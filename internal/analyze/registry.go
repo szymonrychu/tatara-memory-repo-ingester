@@ -2,9 +2,10 @@ package analyze
 
 // Default returns the registry with all built-in analyzers in precedence order.
 // Helm is registered before docs so chart YAML is not swallowed by the doc match.
-func Default() *Registry {
+// crossRepoPrefix is forwarded to the Go analyzer for requires symbol emission.
+func Default(crossRepoPrefix string) *Registry {
 	r := NewRegistry()
-	r.Register(NewGo())
+	r.Register(NewGo(crossRepoPrefix))
 	r.Register(NewPython())
 	r.Register(NewJavaScript())
 	r.Register(NewTerraform())

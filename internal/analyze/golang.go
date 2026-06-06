@@ -1,6 +1,7 @@
 package analyze
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"go/ast"
@@ -16,14 +17,40 @@ import (
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/contract"
 )
 
+// goFuncInfo holds per-function data for call-edge and requires walking.
+type goFuncInfo struct {
+	entityID string
+	decl     *ast.FuncDecl
+	relFile  string
+}
+
 // goAnalyzer implements Analyzer for Go source files using go/packages + go/types.
 type goAnalyzer struct {
-	log *slog.Logger
+	log             *slog.Logger
+	crossRepoPrefix string
 }
 
 // NewGo returns an Analyzer for Go source files.
-func NewGo() Analyzer {
-	return goAnalyzer{log: slog.Default()}
+// crossRepoPrefix filters which external packages are emitted as requires symbols
+// (e.g. "github.com/szymonrychu/").
+func NewGo(crossRepoPrefix string) Analyzer {
+	return goAnalyzer{log: slog.Default(), crossRepoPrefix: crossRepoPrefix}
+}
+
+// ClassifyRef reports whether a reference from objPkgPath (with object name
+// objName) should be emitted as a requires SymbolRow given the current module
+// path and the cross-repo prefix. Returns (emit, symbol).
+// Exported so it can be unit-tested directly without a full packages.Load fixture.
+func ClassifyRef(objPkgPath, objName, modulePath, prefix string) (bool, string) {
+	// In-module reference: never emit.
+	if strings.HasPrefix(objPkgPath, modulePath) {
+		return false, ""
+	}
+	// External but not under the prefix: skip (stdlib, third-party not ours).
+	if !strings.HasPrefix(objPkgPath, prefix) {
+		return false, ""
+	}
+	return true, objPkgPath + "." + objName
 }
 
 // Name returns the analyzer name.
@@ -77,6 +104,8 @@ func (g goAnalyzer) Analyze(ctx context.Context, repoRoot string, files []string
 		}
 	}
 
+	modulePath := readModulePath(repoRoot)
+
 	var res Result
 
 	for _, pkg := range pkgs {
@@ -87,10 +116,27 @@ func (g goAnalyzer) Analyze(ctx context.Context, repoRoot string, files []string
 			)
 			continue
 		}
-		g.processPackage(pkg, pkgPaths, absRepoRoot, scope, &res)
+		g.processPackage(pkg, pkgPaths, absRepoRoot, scope, modulePath, &res)
 	}
 
 	return res, nil
+}
+
+// readModulePath reads the module path from go.mod in repoRoot.
+func readModulePath(repoRoot string) string {
+	f, err := os.Open(filepath.Join(repoRoot, "go.mod")) //nolint:gosec
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimPrefix(line, "module ")
+		}
+	}
+	return ""
 }
 
 func (g goAnalyzer) processPackage(
@@ -98,6 +144,7 @@ func (g goAnalyzer) processPackage(
 	pkgPaths map[string]bool,
 	absRepoRoot string,
 	scope map[string]bool,
+	modulePath string,
 	res *Result,
 ) {
 	pkgID := "go:package:" + pkg.PkgPath
@@ -108,13 +155,7 @@ func (g goAnalyzer) processPackage(
 		Type: contract.EntityGoPackage,
 	})
 
-	// Map from func entity ID to its body (for call-edge walking).
-	type funcInfo struct {
-		entityID string
-		decl     *ast.FuncDecl
-		relFile  string
-	}
-	var funcs []funcInfo
+	var funcs []goFuncInfo
 
 	for _, file := range pkg.Syntax {
 		absFilePath := pkg.Fset.File(file.Pos()).Name()
@@ -151,6 +192,24 @@ func (g goAnalyzer) processPackage(
 				Properties: props,
 			})
 
+			// provides SymbolRow for exported package-level declarations.
+			if ast.IsExported(fd.Name.Name) {
+				kind := goEntityKind(entityType)
+				symbol := pkg.PkgPath + "." + fd.Name.Name
+				if fd.Recv != nil && len(fd.Recv.List) > 0 {
+					recv := receiverTypeName(fd.Recv.List[0].Type)
+					symbol = pkg.PkgPath + "." + recv + "." + fd.Name.Name
+				}
+				res.Symbols = append(res.Symbols, contract.SymbolRow{
+					Symbol:   symbol,
+					Lang:     "go",
+					Kind:     kind,
+					Role:     contract.RoleProvides,
+					EntityID: entityID,
+					SrcFile:  rel,
+				})
+			}
+
 			// defines edge: package -> func/method
 			res.Edges = append(res.Edges, contract.Edge{
 				From:     pkgID,
@@ -172,7 +231,7 @@ func (g goAnalyzer) processPackage(
 				Body:     body,
 			})
 
-			funcs = append(funcs, funcInfo{entityID: entityID, decl: fd, relFile: rel})
+			funcs = append(funcs, goFuncInfo{entityID: entityID, decl: fd, relFile: rel})
 		}
 	}
 
@@ -182,6 +241,80 @@ func (g goAnalyzer) processPackage(
 			continue
 		}
 		g.emitCallEdges(pkg, fi.entityID, fi.relFile, fi.decl.Body, pkgPaths, scope, res)
+	}
+
+	// Emit requires SymbolRows: walk TypesInfo.Uses for cross-module refs under crossRepoPrefix.
+	if g.crossRepoPrefix != "" && modulePath != "" && pkg.TypesInfo != nil {
+		seenReq := map[string]bool{}
+		for ident, obj := range pkg.TypesInfo.Uses {
+			if obj == nil || obj.Pkg() == nil {
+				continue
+			}
+			objPkgPath := obj.Pkg().Path()
+			emit, symbol := ClassifyRef(objPkgPath, obj.Name(), modulePath, g.crossRepoPrefix)
+			if !emit {
+				continue
+			}
+			// Find which in-scope func contains this ident.
+			pos := pkg.Fset.Position(ident.Pos())
+			absFile := pos.Filename
+			rel := repoRelPath(absRepoRoot, absFile)
+			if !scope[rel] {
+				continue
+			}
+			// Find the containing entity (func) for this ident.
+			entityID := g.containingEntity(pkg, ident.Pos(), funcs)
+			key := symbol + "|" + entityID
+			if seenReq[key] {
+				continue
+			}
+			seenReq[key] = true
+			res.Symbols = append(res.Symbols, contract.SymbolRow{
+				Symbol:   symbol,
+				Lang:     "go",
+				Kind:     goObjKind(obj),
+				Role:     contract.RoleRequires,
+				EntityID: entityID,
+				SrcFile:  rel,
+			})
+		}
+	}
+}
+
+// containingEntity finds the entity ID of the func/method in funcs that contains pos.
+func (g goAnalyzer) containingEntity(pkg *packages.Package, pos token.Pos, funcs []goFuncInfo) string {
+	for _, fi := range funcs {
+		if fi.decl.Pos() <= pos && pos <= fi.decl.End() {
+			return fi.entityID
+		}
+	}
+	// Fall back to package entity.
+	return "go:package:" + pkg.PkgPath
+}
+
+// goEntityKind maps an entity type constant to a symbol kind string.
+func goEntityKind(entityType string) string {
+	switch entityType {
+	case contract.EntityGoMethod:
+		return "method"
+	case contract.EntityGoType:
+		return "type"
+	default:
+		return "func"
+	}
+}
+
+// goObjKind returns a symbol kind string for a types.Object.
+func goObjKind(obj types.Object) string {
+	switch obj.(type) {
+	case *types.TypeName:
+		return "type"
+	case *types.Var:
+		return "var"
+	case *types.Const:
+		return "const"
+	default:
+		return "func"
 	}
 }
 
