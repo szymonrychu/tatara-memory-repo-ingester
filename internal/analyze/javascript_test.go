@@ -119,7 +119,6 @@ func TestJavaScriptAnalyzer_DegradedDynamic(t *testing.T) {
 	res, err := a.Analyze(context.Background(), "testdata/js", allJSFiles)
 	require.NoError(t, err)
 
-	// Find dynamicCaller entity and check for dangling_call or degraded_by.
 	var dynamicCallerEntity *contract.Entity
 	for i, e := range res.Entities {
 		if e.ID == "js:func:src/dynamic.js::dynamicCaller" {
@@ -128,12 +127,54 @@ func TestJavaScriptAnalyzer_DegradedDynamic(t *testing.T) {
 		}
 	}
 	require.NotNil(t, dynamicCallerEntity, "expected dynamicCaller entity")
-	// The computed call obj[method]() should be captured: either as dangling or
-	// the entity carries degraded_by. We require dangling_call to be non-empty
-	// (the dynamic call cannot be statically resolved).
 	dangling := dynamicCallerEntity.Properties["dangling_call"]
 	degradedBy := dynamicCallerEntity.Properties["degraded_by"]
-	require.True(t, dangling != "" || strings.Contains(degradedBy, "dynamic"),
-		"expected dynamic call captured in dangling_call or degraded_by, got dangling=%q degraded_by=%q",
-		dangling, degradedBy)
+	// Pin both paths explicitly - dropping either recording must cause a failure.
+	require.NotEmpty(t, dangling, "expected dangling_call set for obj[method]() call")
+	require.Contains(t, degradedBy, "dynamic", "expected degraded_by to contain 'dynamic'")
+}
+
+// TestJavaScriptAnalyzer_RequireImport: CommonJS require() without extension resolves to .js module.
+func TestJavaScriptAnalyzer_RequireImport(t *testing.T) {
+	a := analyze.NewJavaScript()
+
+	files := []string{"src/app.js", "src/util.js", "src/cjs_consumer.js"}
+	res, err := a.Analyze(context.Background(), "testdata/js", files)
+	require.NoError(t, err)
+
+	// cjs_consumer.js does: const x = require('./util')  (no extension)
+	// The import edge must resolve to js:module:src/util.js
+	_, imp := findEdge(res.Edges, contract.RelImports, "js:module:src/cjs_consumer.js", "js:module:src/util.js")
+	require.True(t, imp, "expected cjs_consumer.js imports src/util.js via require() with .js appended")
+}
+
+// TestJavaScriptAnalyzer_Unresolved: a call to a plain undefined identifier produces no calls edge
+// and leaves a dangling_call property on the caller.
+func TestJavaScriptAnalyzer_Unresolved(t *testing.T) {
+	a := analyze.NewJavaScript()
+
+	files := []string{"src/unresolved_caller.js"}
+	res, err := a.Analyze(context.Background(), "testdata/js", files)
+	require.NoError(t, err)
+
+	// No calls edge to any 'nowhere' target must exist.
+	_, ok := findEdge(res.Edges, contract.RelCalls, "js:func:src/unresolved_caller.js::u", "js:func:src/unresolved_caller.js::nowhere")
+	require.False(t, ok, "expected no calls edge for undefined callee 'nowhere'")
+	// A second scan: no edge to nowhere from any source in the result.
+	for _, e := range res.Edges {
+		if e.Relation == contract.RelCalls && strings.HasSuffix(e.To, "::nowhere") {
+			t.Fatalf("found unexpected calls edge to nowhere: %+v", e)
+		}
+	}
+
+	// The caller entity must record dangling_call.
+	var callerEntity *contract.Entity
+	for i, e := range res.Entities {
+		if e.ID == "js:func:src/unresolved_caller.js::u" {
+			callerEntity = &res.Entities[i]
+			break
+		}
+	}
+	require.NotNil(t, callerEntity, "expected entity js:func:src/unresolved_caller.js::u")
+	require.NotEmpty(t, callerEntity.Properties["dangling_call"], "expected dangling_call for call to undefined 'nowhere'")
 }

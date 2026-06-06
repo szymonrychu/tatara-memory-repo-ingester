@@ -63,9 +63,11 @@ func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) 
 		})
 	}
 
-	// Build repo-wide name -> []entityID index across all parsed files.
+	// Build repo-wide name -> []entityID index and O(1) module-path set.
 	repoIndex := map[string][]string{}
+	moduleSet := make(map[string]bool, len(parsed))
 	for _, pf := range parsed {
+		moduleSet[pf.relPath] = true
 		defs := jsFileDefs(pf.relPath, pf.root, pf.src)
 		for name, id := range defs {
 			repoIndex[name] = append(repoIndex[name], id)
@@ -76,7 +78,7 @@ func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) 
 
 	for _, pf := range parsed {
 		moduleDefs := jsFileDefs(pf.relPath, pf.root, pf.src)
-		importMap := jsImportMap(pf.relPath, pf.root, pf.src, repoIndex)
+		importMap := jsImportMap(pf.relPath, pf.root, pf.src, repoIndex, moduleSet)
 		j.processFile(pf.relPath, pf.src, pf.root, moduleDefs, importMap, repoIndex, &res)
 	}
 
@@ -165,9 +167,9 @@ func jsCollectArrowDefs(node *sitter.Node, relPath string, src []byte, defs map[
 	}
 }
 
-// jsImportMap builds local-name -> entityID map from ES import statements.
-// Only names that resolve to a known entity in repoIndex are included.
-func jsImportMap(relPath string, root *sitter.Node, src []byte, repoIndex map[string][]string) map[string]string {
+// jsImportMap builds local-name -> entityID map from ES import statements and CommonJS require() calls.
+// Only names that resolve to a known entity in repoIndex or a known module in moduleSet are included.
+func jsImportMap(relPath string, root *sitter.Node, src []byte, repoIndex map[string][]string, moduleSet map[string]bool) map[string]string {
 	imports := map[string]string{}
 	fileDir := filepath.Dir(relPath)
 
@@ -210,7 +212,7 @@ func jsImportMap(relPath string, root *sitter.Node, src []byte, repoIndex map[st
 			// We look for require() calls in variable declarations too.
 		case "lexical_declaration", "variable_declaration":
 			// const x = require('./module')
-			jsCollectRequireImports(child, fileDir, relPath, src, repoIndex, imports)
+			jsCollectRequireImports(child, fileDir, src, moduleSet, imports)
 		}
 	}
 	return imports
@@ -296,7 +298,8 @@ func jsStringValue(node *sitter.Node, src []byte) string {
 }
 
 // jsCollectRequireImports extracts CommonJS require() bindings from variable declarations.
-func jsCollectRequireImports(node *sitter.Node, fileDir, relPath string, src []byte, repoIndex map[string][]string, imports map[string]string) {
+// It uses moduleSet for O(1) existence checks instead of scanning repoIndex values.
+func jsCollectRequireImports(node *sitter.Node, fileDir string, src []byte, moduleSet map[string]bool, imports map[string]string) {
 	nc := int(node.NamedChildCount())
 	for i := 0; i < nc; i++ {
 		decl := node.NamedChild(i)
@@ -322,26 +325,15 @@ func jsCollectRequireImports(node *sitter.Node, fileDir, relPath string, src []b
 		rawSource := jsStringValue(argNode, src)
 		resolved := resolveModulePath(fileDir, rawSource)
 
-		// The binding name maps to the module entity - track for import edge.
+		// Only record the binding if the target module is known in this repo.
+		if !moduleSet[resolved] {
+			continue
+		}
 		nameNode := decl.ChildByFieldName("name")
 		if nameNode == nil {
 			continue
 		}
-		bindingName := nameNode.Content(src)
-		// Map binding name -> module entity as the import target.
-		targetModID := moduleID(resolved)
-		// Check if the target module exists in repoIndex (any entity from that file).
-		for _, ids := range repoIndex {
-			for _, id := range ids {
-				if strings.HasPrefix(id, "js:module:"+resolved) || strings.HasPrefix(id, "js:func:"+resolved) {
-					imports[bindingName] = targetModID
-					break
-				}
-			}
-			if imports[bindingName] != "" {
-				break
-			}
-		}
+		imports[nameNode.Content(src)] = moduleID(resolved)
 	}
 }
 
@@ -387,6 +379,21 @@ func (j jsAnalyzer) processFile(
 		Header:   fmt.Sprintf("[js_module] %s\nfile: %s", relPath, relPath),
 		Body:     string(src),
 	})
+
+	// Emit require()-based import edges: importMap values that are js:module: IDs
+	// came from CommonJS require() bindings resolved by jsCollectRequireImports.
+	emittedImports := map[string]bool{}
+	for _, targetID := range importMap {
+		if strings.HasPrefix(targetID, "js:module:") && !emittedImports[targetID] {
+			res.Edges = append(res.Edges, contract.Edge{
+				From:     modID,
+				To:       targetID,
+				Relation: contract.RelImports,
+				SrcFile:  relPath,
+			})
+			emittedImports[targetID] = true
+		}
+	}
 
 	// Emit import edges from import_statement nodes.
 	fileDir := filepath.Dir(relPath)
