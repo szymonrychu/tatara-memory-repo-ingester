@@ -7,3 +7,6 @@
 - Prometheus Pushgateway emitter for batch counts.
 - Deploy-time: Keycloak service-account client; Harbor image + infra-helmfile
   tatara-bucket Job release (deploy from main only, rule 10).
+- M5 SCIP: validate/fix reference-edge attribution against a real scip-go index
+  (line-containment heuristic drops body refs when def ranges are name-token-only;
+  consider SCIP enclosing_range or document symbol structure).
