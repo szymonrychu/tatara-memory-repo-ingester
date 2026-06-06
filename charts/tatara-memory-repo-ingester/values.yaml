@@ -1,0 +1,18 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: harbor.szymonrichert.pl/containers/tatara-memory-repo-ingester
+  tag: ""
+  pullPolicy: IfNotPresent
+
+baseUrl: ""
+oidcIssuer: ""
+oidcClientId: ""
+oidcAudience: ""
+repoName: ""
+repoRoot: ""
+
+# Name of an existing Secret (provided by the infra helmfile) that contains
+# OIDC_CLIENT_SECRET.  The Job mounts it via envFrom.secretRef.
+existingSecret: ""

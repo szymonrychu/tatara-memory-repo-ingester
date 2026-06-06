@@ -1,0 +1,4 @@
+Job {{ include "tatara-memory-repo-ingester.fullname" . }} submitted.
+Monitor it with:
+  kubectl get job --namespace {{ .Release.Namespace }} {{ include "tatara-memory-repo-ingester.fullname" . }}
+  kubectl logs --namespace {{ .Release.Namespace }} -l job-name={{ include "tatara-memory-repo-ingester.fullname" . }}
