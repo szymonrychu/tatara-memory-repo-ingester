@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	scipbindings "github.com/scip-code/scip/bindings/go/scip"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/contract"
 )
@@ -56,6 +58,72 @@ func TestRunAggregatesSymbols(t *testing.T) {
 	opts := options{repoRoot: dir, repoName: "x", baseURL: srv.URL, full: true, crossRepoPrefix: "github.com/szymonrychu/"}
 	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
 	require.NotEmpty(t, capturedPush.Symbols, "expected symbols in GraphPush payload")
+}
+
+// TestRunSCIPPath verifies that --scip causes only /code-graph:bulk to be called
+// (no /memories:bulk) and that the entities from the SCIP index are present.
+func TestRunSCIPPath(t *testing.T) {
+	const (
+		symA = "go 1.0 `main`/A()."
+		symB = "go 1.0 `main`/B()."
+	)
+	idx := &scipbindings.Index{
+		Metadata: &scipbindings.Metadata{
+			Version:              0,
+			ProjectRoot:          "file:///repo",
+			TextDocumentEncoding: scipbindings.TextEncoding_UTF8,
+		},
+		Documents: []*scipbindings.Document{
+			{
+				RelativePath: "foo.go",
+				Language:     "go",
+				Symbols: []*scipbindings.SymbolInformation{
+					{Symbol: symA, Kind: scipbindings.SymbolInformation_Function, DisplayName: "A"},
+					{Symbol: symB, Kind: scipbindings.SymbolInformation_Function, DisplayName: "B"},
+				},
+				Occurrences: []*scipbindings.Occurrence{
+					{Range: []int32{0, 0, 5, 0}, Symbol: symA, SymbolRoles: int32(scipbindings.SymbolRole_Definition)},
+					{Range: []int32{10, 0, 15, 0}, Symbol: symB, SymbolRoles: int32(scipbindings.SymbolRole_Definition)},
+					{Range: []int32{2, 4, 2, 5}, Symbol: symB, SymbolRoles: 0},
+				},
+			},
+		},
+	}
+	b, err := proto.Marshal(idx)
+	require.NoError(t, err)
+	tmp := filepath.Join(t.TempDir(), "index.scip")
+	require.NoError(t, os.WriteFile(tmp, b, 0o600))
+
+	var graphHit bool
+	var chunksCalled bool
+	var capturedPush contract.GraphPush
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph:bulk":
+			graphHit = true
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &capturedPush)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"myrepo"}`))
+		case "/memories:bulk":
+			chunksCalled = true
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	opts := options{scipPath: tmp, scipRepo: "myrepo", baseURL: srv.URL}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+
+	require.True(t, graphHit, "code-graph:bulk must be called")
+	require.False(t, chunksCalled, "memories:bulk must NOT be called for SCIP path")
+	require.Len(t, capturedPush.Entities, 2)
+	require.Len(t, capturedPush.Edges, 1)
 }
 
 func TestRunIngestsFixtureRepo(t *testing.T) {

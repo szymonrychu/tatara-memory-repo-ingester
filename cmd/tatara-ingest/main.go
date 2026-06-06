@@ -56,13 +56,21 @@ func realMain() error {
 func resolveOptions(args []string, getenv func(string) string) (options, error) {
 	o := options{}
 	fs := flag.NewFlagSet("tatara-ingest", flag.ContinueOnError)
-	fs.StringVar(&o.repoRoot, "repo-root", envKey(getenv, "repo-root"), "path to the repository root (required)")
+	fs.StringVar(&o.repoRoot, "repo-root", envKey(getenv, "repo-root"), "path to the repository root (required unless --scip is set)")
 	fs.StringVar(&o.repoName, "repo-name", envKey(getenv, "repo-name"), "logical repo name (default: basename of repo-root)")
 	fs.StringVar(&o.since, "since", "", "base commit for incremental ingest")
 	fs.BoolVar(&o.full, "full", false, "force full re-ingest")
 	fs.StringVar(&o.baseURL, "base-url", envKey(getenv, "base-url"), "tatara-memory base URL")
+	fs.StringVar(&o.scipPath, "scip", "", "path to a pre-generated SCIP index.scip file (bypasses repo walk)")
+	fs.StringVar(&o.scipRepo, "scip-repo", "", "logical repo name for SCIP ingest (required when --scip is set)")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
+	}
+	if o.scipPath != "" {
+		if o.scipRepo == "" {
+			return options{}, errMissingSCIPRepo
+		}
+		return o, nil
 	}
 	if o.repoRoot == "" {
 		return options{}, errMissingRepoRoot

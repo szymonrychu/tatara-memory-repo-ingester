@@ -110,10 +110,26 @@ func (g goAnalyzer) Analyze(ctx context.Context, repoRoot string, files []string
 
 	for _, pkg := range pkgs {
 		if len(pkg.Errors) > 0 {
-			g.log.Warn("skipping package with errors",
+			g.log.Warn("package has errors, using tree-sitter fallback",
 				slog.String("pkg", pkg.PkgPath),
 				slog.Int("errors", len(pkg.Errors)),
 			)
+			// Collect absolute paths of in-scope files for this package.
+			var pkgFiles []string
+			for _, goFile := range pkg.GoFiles {
+				rel := repoRelPath(absRepoRoot, goFile)
+				if scope[rel] {
+					pkgFiles = append(pkgFiles, goFile)
+				}
+			}
+			if len(pkgFiles) == 0 {
+				continue
+			}
+			fallbackRes := fallbackAnalyzeGoPackage(g.log, modulePath, absRepoRoot, scope, pkgFiles)
+			res.Entities = append(res.Entities, fallbackRes.Entities...)
+			res.Edges = append(res.Edges, fallbackRes.Edges...)
+			res.Chunks = append(res.Chunks, fallbackRes.Chunks...)
+			res.Symbols = append(res.Symbols, fallbackRes.Symbols...)
 			continue
 		}
 		g.processPackage(pkg, pkgPaths, absRepoRoot, scope, modulePath, &res)
