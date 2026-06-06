@@ -9,6 +9,7 @@ require (
 	github.com/zclconf/go-cty v1.16.3
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/tools v0.45.0
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -17,6 +18,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
+	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/mod v0.36.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/text v0.25.0 // indirect
