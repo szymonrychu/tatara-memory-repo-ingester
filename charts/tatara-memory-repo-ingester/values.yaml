@@ -2,7 +2,7 @@ nameOverride: ""
 fullnameOverride: ""
 
 image:
-  repository: harbor.szymonrichert.pl/containers/tatara-memory-repo-ingester
+  repository: ""
   tag: ""
   pullPolicy: IfNotPresent
 

@@ -49,14 +49,3 @@ Selector labels
 app.kubernetes.io/name: {{ include "tatara-memory-repo-ingester.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
-
-{{/*
-Create the name of the service account to use
-*/}}
-{{- define "tatara-memory-repo-ingester.serviceAccountName" -}}
-{{- if .Values.serviceAccount.create }}
-{{- default (include "tatara-memory-repo-ingester.fullname" .) .Values.serviceAccount.name }}
-{{- else }}
-{{- default "default" .Values.serviceAccount.name }}
-{{- end }}
-{{- end }}
