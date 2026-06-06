@@ -1,0 +1,9 @@
+{{- with .Values.image }}
+pullPolicy: {{ .pullPolicy }}
+{{- end }}
+{{- if .Values.enabled }}
+enabled: true
+{{- end }}
+{{- range .Values.image }}
+item: value
+{{- end }}

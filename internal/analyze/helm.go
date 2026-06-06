@@ -189,31 +189,40 @@ func (ha helmAnalyzer) processTemplate(repoRoot, relPath, chartName string, valu
 	})
 }
 
+// walkPipe processes all commands in a PipeNode, extracting value refs and include edges.
+func walkPipe(pipe *parse.PipeNode, tmplID, srcFile, chartName string, valueIDs map[string]bool, res *Result) {
+	if pipe == nil {
+		return
+	}
+	for _, cmd := range pipe.Cmds {
+		processCmd(cmd, tmplID, srcFile, chartName, valueIDs, res)
+	}
+}
+
 // walkNodes recursively walks template parse tree nodes collecting edges.
 func walkNodes(nodes []parse.Node, tmplID, srcFile, chartName string, valueIDs map[string]bool, res *Result) {
 	for _, n := range nodes {
 		switch node := n.(type) {
 		case *parse.ActionNode:
-			if node.Pipe != nil {
-				for _, cmd := range node.Pipe.Cmds {
-					processCmd(cmd, tmplID, srcFile, chartName, valueIDs, res)
-				}
-			}
+			walkPipe(node.Pipe, tmplID, srcFile, chartName, valueIDs, res)
 		case *parse.ListNode:
 			if node != nil {
 				walkNodes(node.Nodes, tmplID, srcFile, chartName, valueIDs, res)
 			}
 		case *parse.IfNode:
+			walkPipe(node.Pipe, tmplID, srcFile, chartName, valueIDs, res)
 			walkNodes(node.List.Nodes, tmplID, srcFile, chartName, valueIDs, res)
 			if node.ElseList != nil {
 				walkNodes(node.ElseList.Nodes, tmplID, srcFile, chartName, valueIDs, res)
 			}
 		case *parse.RangeNode:
+			walkPipe(node.Pipe, tmplID, srcFile, chartName, valueIDs, res)
 			walkNodes(node.List.Nodes, tmplID, srcFile, chartName, valueIDs, res)
 			if node.ElseList != nil {
 				walkNodes(node.ElseList.Nodes, tmplID, srcFile, chartName, valueIDs, res)
 			}
 		case *parse.WithNode:
+			walkPipe(node.Pipe, tmplID, srcFile, chartName, valueIDs, res)
 			walkNodes(node.List.Nodes, tmplID, srcFile, chartName, valueIDs, res)
 			if node.ElseList != nil {
 				walkNodes(node.ElseList.Nodes, tmplID, srcFile, chartName, valueIDs, res)

@@ -24,6 +24,8 @@ func TestHelmAnalyzer(t *testing.T) {
 		"mychart/Chart.yaml",
 		"mychart/values.yaml",
 		"mychart/templates/deployment.yaml",
+		"mychart/templates/conditions.yaml",
+		"mychart/templates/broken.yaml",
 	}
 	res, err := a.Analyze(context.Background(), "testdata/helm", files)
 	require.NoError(t, err)
@@ -54,6 +56,21 @@ func TestHelmAnalyzer(t *testing.T) {
 	// subchart edge: helm:chart:mychart -> helm:chart:common (from dependencies)
 	_, sub := findEdge(res.Edges, contract.RelSubchart, "helm:chart:mychart", "helm:chart:common")
 	require.True(t, sub, "expected subchart edge mychart->common")
+
+	// value_ref edges from control-node CONDITIONS (with/if/range .Pipe):
+	// .Values.image appears ONLY in a `with` condition in conditions.yaml
+	condTmplID := "helm:template:mychart/templates/conditions.yaml"
+	_, withRef := findEdge(res.Edges, contract.RelValueRef, condTmplID, "helm:value:mychart.image")
+	require.True(t, withRef, "expected value_ref edge from with .Values.image condition")
+
+	// .Values.enabled appears ONLY in an `if` condition in conditions.yaml
+	_, ifRef := findEdge(res.Edges, contract.RelValueRef, condTmplID, "helm:value:mychart.enabled")
+	require.True(t, ifRef, "expected value_ref edge from if .Values.enabled condition")
+
+	// resilience: broken.yaml is unparseable; analyzer must not crash and must still emit
+	// entities/edges for deployment.yaml and conditions.yaml in the same chart
+	require.True(t, ids[tmplID], "deployment template entity still present despite broken.yaml")
+	require.True(t, ids[condTmplID], "conditions template entity still present despite broken.yaml")
 
 	// CONTRACT: all FilePath/SrcFile/chunk paths must be repo-relative and within files set
 	scope := map[string]bool{}
