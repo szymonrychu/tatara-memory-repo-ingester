@@ -28,6 +28,44 @@ func findEdge(edges []contract.Edge, rel, from, to string) (contract.Edge, bool)
 	return contract.Edge{}, false
 }
 
+// TestGoRequiresEmission verifies that Analyze emits correct requires SymbolRows for
+// cross-repo func AND method references, and that the method symbol key is
+// byte-identical to what the provides side would emit for the same method.
+// This is the regression guard for the method join-key mismatch bug.
+func TestGoRequiresEmission(t *testing.T) {
+	// crossRepoPrefix = "example.com/dep" so that references to example.com/dep/pkg
+	// are treated as external (the sample module is example.com/sample, not example.com/dep).
+	a := analyze.NewGo("example.com/dep")
+
+	files := []string{"consumer/consumer.go"}
+	res, err := a.Analyze(context.Background(), "testdata/go", files)
+	require.NoError(t, err)
+
+	// --- requires: cross-repo func Do ---
+	// Provides side key (from processPackage): pkgPath + "." + fd.Name.Name
+	//   = "example.com/dep/pkg.Do"
+	// Requires side key (from ClassifyRef): objPkgPath + "." + obj.Name()
+	//   = "example.com/dep/pkg.Do"   (obj.Name() == "Do")
+	reqFunc, okFunc := findSymbol(res.Symbols, contract.RoleRequires, "example.com/dep/pkg.Do")
+	require.True(t, okFunc, "expected requires SymbolRow for example.com/dep/pkg.Do")
+	require.Equal(t, "go", reqFunc.Lang)
+	require.Equal(t, "func", reqFunc.Kind)
+
+	// --- requires: cross-repo method T.M ---
+	// Provides side key (from processPackage, recv != nil branch):
+	//   pkgPath + "." + recv + "." + fd.Name.Name
+	//   = "example.com/dep/pkg.T.M"
+	// Requires side key MUST match EXACTLY.
+	// Bug: without the fix, ClassifyRef returns "example.com/dep/pkg.M" (no receiver),
+	// so this assertion FAILS on the unfixed code (that is the regression guard).
+	wantMethodSymbol := "example.com/dep/pkg.T.M"
+	reqMethod, okMethod := findSymbol(res.Symbols, contract.RoleRequires, wantMethodSymbol)
+	require.True(t, okMethod,
+		"expected requires SymbolRow for %q (method join-key must include receiver type)", wantMethodSymbol)
+	require.Equal(t, "go", reqMethod.Lang)
+	require.Equal(t, "method", reqMethod.Kind)
+}
+
 // TestClassifyRef tests the pure helper via the exported shim.
 func TestClassifyRef(t *testing.T) {
 	cases := []struct {

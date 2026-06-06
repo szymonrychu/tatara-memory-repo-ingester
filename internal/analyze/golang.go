@@ -251,7 +251,11 @@ func (g goAnalyzer) processPackage(
 				continue
 			}
 			objPkgPath := obj.Pkg().Path()
-			emit, symbol := ClassifyRef(objPkgPath, obj.Name(), modulePath, g.crossRepoPrefix)
+			// For methods, reconstruct the receiver-qualified name so the requires key
+			// matches the provides key emitted by the processPackage provides side:
+			// "<pkgPath>.<RecvType>.<Method>".  For funcs/types, obj.Name() is correct.
+			objName := crossRepoSymbolName(obj)
+			emit, symbol := ClassifyRef(objPkgPath, objName, modulePath, g.crossRepoPrefix)
 			if !emit {
 				continue
 			}
@@ -306,16 +310,44 @@ func goEntityKind(entityType string) string {
 
 // goObjKind returns a symbol kind string for a types.Object.
 func goObjKind(obj types.Object) string {
-	switch obj.(type) {
+	switch v := obj.(type) {
 	case *types.TypeName:
 		return "type"
 	case *types.Var:
 		return "var"
 	case *types.Const:
 		return "const"
+	case *types.Func:
+		if sig, ok := v.Type().(*types.Signature); ok && sig.Recv() != nil {
+			return "method"
+		}
+		return "func"
 	default:
 		return "func"
 	}
+}
+
+// crossRepoSymbolName returns the name component for a cross-repo requires SymbolRow.
+// For methods it returns "<RecvTypeName>.<MethodName>" so the key matches the provides side
+// which emits "<pkgPath>.<RecvTypeName>.<MethodName>".
+// For all other objects it returns obj.Name().
+func crossRepoSymbolName(obj types.Object) string {
+	fn, ok := obj.(*types.Func)
+	if !ok {
+		return obj.Name()
+	}
+	sig, ok2 := fn.Type().(*types.Signature)
+	if !ok2 || sig.Recv() == nil {
+		return obj.Name()
+	}
+	recv := sig.Recv().Type()
+	if ptr, isPtr := recv.(*types.Pointer); isPtr {
+		recv = ptr.Elem()
+	}
+	if named, isNamed := recv.(*types.Named); isNamed {
+		return named.Obj().Name() + "." + fn.Name()
+	}
+	return obj.Name()
 }
 
 // funcEntityID returns (entityID, entityType, shortName) for a FuncDecl.
