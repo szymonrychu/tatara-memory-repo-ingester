@@ -34,36 +34,55 @@ func (p pythonAnalyzer) Match(path string) bool {
 
 // Analyze parses each file with tree-sitter and emits entities, edges, and chunks.
 func (p pythonAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) (Result, error) {
-	// Build scope set.
-	scope := make(map[string]bool, len(files))
-	for _, f := range files {
-		scope[f] = true
-	}
-
 	lang := python.GetLanguage()
-	parser := sitter.NewParser()
-	parser.SetLanguage(lang)
 
-	var res Result
-
+	// First pass: parse every file and collect per-file AST + src for the repo-wide index.
+	type parsedFile struct {
+		relPath   string
+		moduleFQN string
+		src       []byte
+		root      *sitter.Node
+	}
+	parsed := make([]parsedFile, 0, len(files))
 	for _, relPath := range files {
-		if !scope[relPath] {
-			continue
-		}
 		absPath := filepath.Join(repoRoot, relPath)
 		src, err := os.ReadFile(absPath) //nolint:gosec
 		if err != nil {
 			return Result{}, fmt.Errorf("read %q: %w", absPath, err)
 		}
-
 		root, err := sitter.ParseCtx(context.Background(), src, lang)
 		if err != nil {
 			p.log.Warn("tree-sitter parse error", slog.String("file", relPath), slog.String("err", err.Error()))
 			continue
 		}
+		parsed = append(parsed, parsedFile{
+			relPath:   relPath,
+			moduleFQN: pathToFQN(relPath),
+			src:       src,
+			root:      root,
+		})
+	}
 
-		moduleFQN := pathToFQN(relPath)
-		p.processFile(relPath, moduleFQN, src, root, &res)
+	// Build repo-wide name -> []entityID index from all parsed files.
+	// Used for global_name_match and ambiguous_multi_def resolution.
+	repoIndex := map[string][]string{}
+	for _, pf := range parsed {
+		defs := pyFileDefs(pf.moduleFQN, pf.root, pf.src)
+		for name, id := range defs {
+			repoIndex[name] = append(repoIndex[name], id)
+		}
+	}
+
+	var res Result
+
+	for _, pf := range parsed {
+		// Build module-level def map (scoped resolution).
+		moduleDefs := pyFileDefs(pf.moduleFQN, pf.root, pf.src)
+
+		// Build import map: local name -> entityID resolved via tracked imports.
+		importMap := pyImportMap(pf.root, pf.src, repoIndex)
+
+		p.processFile(pf.relPath, pf.moduleFQN, pf.src, pf.root, moduleDefs, importMap, repoIndex, &res)
 	}
 
 	return res, nil
@@ -89,6 +108,16 @@ func pyFileDefs(moduleFQN string, root *sitter.Node, src []byte) map[string]stri
 				n := name.Content(src)
 				defs[n] = "py:func:" + moduleFQN + "." + n
 			}
+		case "decorated_definition":
+			// The inner function_definition is a child of decorated_definition.
+			inner := child.ChildByFieldName("definition")
+			if inner != nil && inner.Type() == "function_definition" {
+				name := inner.ChildByFieldName("name")
+				if name != nil {
+					n := name.Content(src)
+					defs[n] = "py:func:" + moduleFQN + "." + n
+				}
+			}
 		case "class_definition":
 			className := child.ChildByFieldName("name")
 			if className != nil {
@@ -113,8 +142,66 @@ func pyFileDefs(moduleFQN string, root *sitter.Node, src []byte) map[string]stri
 	return defs
 }
 
+// pyImportMap builds a local-name -> entityID map from import statements in the file.
+// Only names that resolve to a known entity in repoIndex are included.
+func pyImportMap(root *sitter.Node, src []byte, repoIndex map[string][]string) map[string]string {
+	imports := map[string]string{}
+	count := int(root.NamedChildCount())
+	for i := 0; i < count; i++ {
+		child := root.NamedChild(i)
+		switch child.Type() {
+		case "import_from_statement":
+			// from <module> import <name>[, <name>...]
+			// The imported names appear as dotted_name or aliased_import children after "import".
+			moduleName := ""
+			modNode := child.ChildByFieldName("module_name")
+			if modNode != nil {
+				moduleName = modNode.Content(src)
+			}
+			if moduleName == "" {
+				continue
+			}
+			// Convert "pkg.helper" -> "pkg.helper"
+			moduleFQN := moduleName
+
+			nc := int(child.NamedChildCount())
+			for j := 0; j < nc; j++ {
+				n := child.NamedChild(j)
+				if n == child.ChildByFieldName("module_name") {
+					continue
+				}
+				// Each imported name is a dotted_name or identifier node.
+				localName := n.Content(src)
+				candidateID := "py:func:" + moduleFQN + "." + localName
+				// Check if this entity is known in the repo index.
+				ids := repoIndex[localName]
+				for _, id := range ids {
+					if id == candidateID {
+						imports[localName] = candidateID
+						break
+					}
+				}
+			}
+
+		case "import_statement":
+			// import <module> [as <alias>]
+			// We track "import pkg.helper" -> not providing a local function name directly.
+			// Only aliased imports are commonly used for calls; skip bare module imports here
+			// since the call would be "module.func()" (attribute), not "func()".
+		}
+	}
+	return imports
+}
+
 // processFile emits all entities, edges, and chunks for one Python file.
-func (p pythonAnalyzer) processFile(relPath, moduleFQN string, src []byte, root *sitter.Node, res *Result) {
+func (p pythonAnalyzer) processFile(
+	relPath, moduleFQN string,
+	src []byte, root *sitter.Node,
+	moduleDefs map[string]string,
+	importMap map[string]string,
+	repoIndex map[string][]string,
+	res *Result,
+) {
 	moduleID := "py:module:" + moduleFQN
 
 	res.Entities = append(res.Entities, contract.Entity{
@@ -124,7 +211,6 @@ func (p pythonAnalyzer) processFile(relPath, moduleFQN string, src []byte, root 
 		FilePath: relPath,
 	})
 
-	// Chunk for the module.
 	res.Chunks = append(res.Chunks, contract.Chunk{
 		EntityID: moduleID,
 		Type:     contract.EntityPyModule,
@@ -134,17 +220,19 @@ func (p pythonAnalyzer) processFile(relPath, moduleFQN string, src []byte, root 
 		Body:     string(src),
 	})
 
-	// Build module-level def map for scoped call resolution.
-	moduleDefs := pyFileDefs(moduleFQN, root, src)
-
 	count := int(root.NamedChildCount())
 	for i := 0; i < count; i++ {
 		child := root.NamedChild(i)
 		switch child.Type() {
 		case "function_definition":
-			p.emitFunc(relPath, moduleFQN, moduleID, "", src, child, moduleDefs, res)
+			p.emitFunc(relPath, moduleFQN, moduleID, "", false, src, child, moduleDefs, importMap, repoIndex, res)
+		case "decorated_definition":
+			inner := child.ChildByFieldName("definition")
+			if inner != nil && inner.Type() == "function_definition" {
+				p.emitFunc(relPath, moduleFQN, moduleID, "", true, src, inner, moduleDefs, importMap, repoIndex, res)
+			}
 		case "class_definition":
-			p.emitClass(relPath, moduleFQN, moduleID, src, child, moduleDefs, res)
+			p.emitClass(relPath, moduleFQN, moduleID, src, child, moduleDefs, importMap, repoIndex, res)
 		}
 	}
 }
@@ -154,6 +242,8 @@ func (p pythonAnalyzer) emitClass(
 	relPath, moduleFQN, moduleID string,
 	src []byte, node *sitter.Node,
 	moduleDefs map[string]string,
+	importMap map[string]string,
+	repoIndex map[string][]string,
 	res *Result,
 ) {
 	nameNode := node.ChildByFieldName("name")
@@ -192,17 +282,21 @@ func (p pythonAnalyzer) emitClass(
 	for j := 0; j < bc; j++ {
 		meth := body.NamedChild(j)
 		if meth.Type() == "function_definition" {
-			p.emitFunc(relPath, moduleFQN, classID, cname, src, meth, moduleDefs, res)
+			p.emitFunc(relPath, moduleFQN, classID, cname, false, src, meth, moduleDefs, importMap, repoIndex, res)
 		}
 	}
 }
 
 // emitFunc emits a py_func entity and its call edges.
 // parentClass is empty for module-level functions.
+// isDecorated indicates the function is wrapped in a decorated_definition node.
 func (p pythonAnalyzer) emitFunc(
 	relPath, moduleFQN, parentID, parentClass string,
+	isDecorated bool,
 	src []byte, node *sitter.Node,
 	moduleDefs map[string]string,
+	importMap map[string]string,
+	repoIndex map[string][]string,
 	res *Result,
 ) {
 	nameNode := node.ChildByFieldName("name")
@@ -240,47 +334,111 @@ func (p pythonAnalyzer) emitFunc(
 		Body:     node.Content(src),
 	})
 
-	// Walk the function body for calls.
 	body := node.ChildByFieldName("body")
 	if body == nil {
 		return
 	}
 
-	// Track dangling calls per entity (appended as comma-joined property).
 	danglingCalls := []string{}
 
 	walkCalls(body, src, func(calleeNode *sitter.Node) {
 		calleeName := calleeNode.Content(src)
 
-		// Attribute call (e.g. obj.method) - callee is the selector, we only have the
-		// attribute name; treat as dangling unless it resolves to a module def.
+		// Attribute call (e.g. obj.method) - treat as dangling.
 		if calleeNode.Type() == "attribute" {
 			danglingCalls = append(danglingCalls, calleeName)
 			return
 		}
 
-		// Plain identifier call.
+		// Resolution ladder (plain identifier).
+		//
+		// Tier 1: scoped_name_match - callee defined in this module.
 		if calleeID, ok := moduleDefs[calleeName]; ok {
-			// scoped_name_match: defined in this module
+			conf := contract.ConfidenceFor(contract.ResScopedNameMatch)
+			props := map[string]string{
+				"resolution": contract.ResScopedNameMatch,
+				"confidence": conf,
+			}
+			if isDecorated {
+				props = degraded(props, "decorator")
+			}
 			res.Edges = append(res.Edges, contract.Edge{
-				From:     funcID,
-				To:       calleeID,
-				Relation: contract.RelCalls,
-				SrcFile:  relPath,
-				Properties: map[string]string{
-					"resolution": contract.ResScopedNameMatch,
-					"confidence": contract.ConfidenceFor(contract.ResScopedNameMatch),
-				},
+				From:       funcID,
+				To:         calleeID,
+				Relation:   contract.RelCalls,
+				SrcFile:    relPath,
+				Properties: props,
 			})
 			return
 		}
 
-		// Unresolved (builtin / external) - record as dangling, no edge.
-		danglingCalls = append(danglingCalls, calleeName)
+		// Tier 2: imported_name_match - callee resolves through a tracked import.
+		if calleeID, ok := importMap[calleeName]; ok {
+			conf := contract.ConfidenceFor(contract.ResImportedNameMatch)
+			props := map[string]string{
+				"resolution": contract.ResImportedNameMatch,
+				"confidence": conf,
+			}
+			if isDecorated {
+				props = degraded(props, "decorator")
+			}
+			res.Edges = append(res.Edges, contract.Edge{
+				From:       funcID,
+				To:         calleeID,
+				Relation:   contract.RelCalls,
+				SrcFile:    relPath,
+				Properties: props,
+			})
+			return
+		}
+
+		// Tier 3: global or ambiguous - look up in repo-wide index.
+		ids := repoIndex[calleeName]
+		switch len(ids) {
+		case 0:
+			// Tier 4: unresolved - dangling.
+			danglingCalls = append(danglingCalls, calleeName)
+
+		case 1:
+			// global_name_match: unique repo-wide definition.
+			conf := contract.ConfidenceFor(contract.ResGlobalNameMatch)
+			props := map[string]string{
+				"resolution": contract.ResGlobalNameMatch,
+				"confidence": conf,
+			}
+			if isDecorated {
+				props = degraded(props, "decorator")
+			}
+			res.Edges = append(res.Edges, contract.Edge{
+				From:       funcID,
+				To:         ids[0],
+				Relation:   contract.RelCalls,
+				SrcFile:    relPath,
+				Properties: props,
+			})
+
+		default:
+			// ambiguous_multi_def: multiple repo-wide definitions.
+			for _, id := range ids {
+				props := map[string]string{
+					"resolution": contract.ResAmbiguousMultiDef,
+					"confidence": contract.ConfidenceFor(contract.ResAmbiguousMultiDef),
+				}
+				if isDecorated {
+					props = degraded(props, "decorator")
+				}
+				res.Edges = append(res.Edges, contract.Edge{
+					From:       funcID,
+					To:         id,
+					Relation:   contract.RelCalls,
+					SrcFile:    relPath,
+					Properties: props,
+				})
+			}
+		}
 	})
 
 	if len(danglingCalls) > 0 {
-		// Attach dangling_call property to the entity.
 		for i, e := range res.Entities {
 			if e.ID == funcID {
 				if res.Entities[i].Properties == nil {
@@ -291,6 +449,27 @@ func (p pythonAnalyzer) emitFunc(
 			}
 		}
 	}
+}
+
+// degraded returns a copy of props with confidence capped at "0.45" and
+// degraded_by set (comma-joined if already present).
+func degraded(props map[string]string, reason string) map[string]string {
+	out := make(map[string]string, len(props)+1)
+	for k, v := range props {
+		out[k] = v
+	}
+	// Cap confidence at 0.45.
+	conf := out["confidence"]
+	if conf == "" || conf > "0.45" {
+		out["confidence"] = "0.45"
+	}
+	// Append reason to degraded_by.
+	if existing, ok := out["degraded_by"]; ok && existing != "" {
+		out["degraded_by"] = existing + "," + reason
+	} else {
+		out["degraded_by"] = reason
+	}
+	return out
 }
 
 // walkCalls recursively walks a node tree and calls fn for every call
