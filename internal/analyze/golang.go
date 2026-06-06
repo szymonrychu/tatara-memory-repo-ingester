@@ -8,6 +8,7 @@ import (
 	"go/types"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
@@ -34,7 +35,19 @@ func (g goAnalyzer) Match(path string) bool {
 }
 
 // Analyze loads all packages under repoRoot and emits entities, edges, and chunks.
-func (g goAnalyzer) Analyze(ctx context.Context, repoRoot string, _ []string) (Result, error) {
+// Only entities whose FilePath is in the files set are emitted.
+func (g goAnalyzer) Analyze(ctx context.Context, repoRoot string, files []string) (Result, error) {
+	absRepoRoot, err := filepath.Abs(repoRoot)
+	if err != nil {
+		return Result{}, fmt.Errorf("filepath.Abs(%q): %w", repoRoot, err)
+	}
+
+	// Build scope set from caller-supplied file list (repo-relative paths).
+	scope := make(map[string]bool, len(files))
+	for _, f := range files {
+		scope[f] = true
+	}
+
 	mode := packages.NeedName |
 		packages.NeedFiles |
 		packages.NeedSyntax |
@@ -74,13 +87,19 @@ func (g goAnalyzer) Analyze(ctx context.Context, repoRoot string, _ []string) (R
 			)
 			continue
 		}
-		g.processPackage(pkg, pkgPaths, &res)
+		g.processPackage(pkg, pkgPaths, absRepoRoot, scope, &res)
 	}
 
 	return res, nil
 }
 
-func (g goAnalyzer) processPackage(pkg *packages.Package, pkgPaths map[string]bool, res *Result) {
+func (g goAnalyzer) processPackage(
+	pkg *packages.Package,
+	pkgPaths map[string]bool,
+	absRepoRoot string,
+	scope map[string]bool,
+	res *Result,
+) {
 	pkgID := "go:package:" + pkg.PkgPath
 
 	res.Entities = append(res.Entities, contract.Entity{
@@ -93,11 +112,18 @@ func (g goAnalyzer) processPackage(pkg *packages.Package, pkgPaths map[string]bo
 	type funcInfo struct {
 		entityID string
 		decl     *ast.FuncDecl
+		relFile  string
 	}
 	var funcs []funcInfo
 
 	for _, file := range pkg.Syntax {
-		filePath := pkg.Fset.File(file.Pos()).Name()
+		absFilePath := pkg.Fset.File(file.Pos()).Name()
+		rel := repoRelPath(absRepoRoot, absFilePath)
+
+		// Skip files not in scope.
+		if !scope[rel] {
+			continue
+		}
 
 		for _, decl := range file.Decls {
 			fd, ok := decl.(*ast.FuncDecl)
@@ -121,7 +147,7 @@ func (g goAnalyzer) processPackage(pkg *packages.Package, pkgPaths map[string]bo
 				ID:         entityID,
 				Name:       name,
 				Type:       entityType,
-				FilePath:   relPath(filePath, pkg.Fset),
+				FilePath:   rel,
 				Properties: props,
 			})
 
@@ -130,23 +156,23 @@ func (g goAnalyzer) processPackage(pkg *packages.Package, pkgPaths map[string]bo
 				From:     pkgID,
 				To:       entityID,
 				Relation: contract.RelDefines,
-				SrcFile:  relPath(filePath, pkg.Fset),
+				SrcFile:  rel,
 			})
 
 			// Chunk
-			body := sourceSlice(pkg.Fset, fd.Pos(), fd.End(), filePath)
+			body := sourceSlice(pkg.Fset, fd.Pos(), fd.End(), absFilePath)
 			header := fmt.Sprintf("[%s] %s\nfile: %s\npackage: %s\nsignature: %s",
-				entityType, entityID, relPath(filePath, pkg.Fset), pkg.PkgPath, sig)
+				entityType, entityID, rel, pkg.PkgPath, sig)
 			res.Chunks = append(res.Chunks, contract.Chunk{
 				EntityID: entityID,
 				Type:     entityType,
-				FilePath: relPath(filePath, pkg.Fset),
+				FilePath: rel,
 				Language: "go",
 				Header:   header,
 				Body:     body,
 			})
 
-			funcs = append(funcs, funcInfo{entityID: entityID, decl: fd})
+			funcs = append(funcs, funcInfo{entityID: entityID, decl: fd, relFile: rel})
 		}
 	}
 
@@ -155,7 +181,7 @@ func (g goAnalyzer) processPackage(pkg *packages.Package, pkgPaths map[string]bo
 		if fi.decl.Body == nil {
 			continue
 		}
-		g.emitCallEdges(pkg, fi.entityID, fi.decl.Body, pkgPaths, res)
+		g.emitCallEdges(pkg, fi.entityID, fi.relFile, fi.decl.Body, pkgPaths, scope, res)
 	}
 }
 
@@ -200,11 +226,15 @@ func funcSignature(fset *token.FileSet, info *types.Info, fd *ast.FuncDecl) stri
 }
 
 // emitCallEdges walks a function body and emits calls edges for resolved callees.
+// callerRelFile is the repo-relative path of the file containing the caller; it
+// is already known to be in scope.
 func (g goAnalyzer) emitCallEdges(
 	pkg *packages.Package,
 	callerID string,
+	callerRelFile string,
 	body *ast.BlockStmt,
 	pkgPaths map[string]bool,
+	_ map[string]bool,
 	res *Result,
 ) {
 	seenEdge := map[string]bool{}
@@ -247,13 +277,11 @@ func (g goAnalyzer) emitCallEdges(
 		}
 		seenEdge[edgeKey] = true
 
-		filePath := pkg.Fset.Position(call.Pos()).Filename
-
 		res.Edges = append(res.Edges, contract.Edge{
 			From:     callerID,
 			To:       calleeID,
 			Relation: contract.RelCalls,
-			SrcFile:  relPath(filePath, pkg.Fset),
+			SrcFile:  callerRelFile,
 			Properties: map[string]string{
 				"resolution": contract.ResTypeResolved,
 				"confidence": contract.ConfidenceFor(contract.ResTypeResolved),
@@ -293,10 +321,14 @@ func calleeIdent(expr ast.Expr) *ast.Ident {
 	return nil
 }
 
-// relPath returns the file's path. Since packages returns absolute paths,
-// we just return the raw path; the test checks entity presence not the path value.
-func relPath(absPath string, _ *token.FileSet) string {
-	return absPath
+// repoRelPath returns the path of absFilePath relative to absRepoRoot.
+// Falls back to absFilePath if Rel fails (should not happen in practice).
+func repoRelPath(absRepoRoot, absFilePath string) string {
+	rel, err := filepath.Rel(absRepoRoot, absFilePath)
+	if err != nil {
+		return absFilePath
+	}
+	return rel
 }
 
 // sourceSlice reads the source bytes for the range [start,end) from the named file.

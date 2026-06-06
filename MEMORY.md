@@ -12,3 +12,4 @@
 - 2026-06-06: contract types are mirrored from tatara-memory's internal/codegraph
   (cannot import an internal package across modules); contract_shape_test.go
   guards the JSON shapes against drift.
+- 2026-06-06: analyzers MUST emit repo-relative paths (filepath.Rel(absRepoRoot, absFile)) and filter all entity/edge/chunk emission to the files arg - tatara-memory /code-graph:bulk rejects any push where FilePath or SrcFile is not in the push's files set.
