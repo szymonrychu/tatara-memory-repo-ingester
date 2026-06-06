@@ -79,7 +79,7 @@ func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) 
 	for _, pf := range parsed {
 		moduleDefs := jsFileDefs(pf.relPath, pf.root, pf.src)
 		importMap := jsImportMap(pf.relPath, pf.root, pf.src, repoIndex, moduleSet)
-		j.processFile(pf.relPath, pf.src, pf.root, moduleDefs, importMap, repoIndex, &res)
+		j.processFile(pf.relPath, pf.src, pf.root, moduleDefs, importMap, repoIndex, moduleSet, &res)
 	}
 
 	return res, nil
@@ -353,6 +353,35 @@ func resolveModulePath(fileDir, specifier string) string {
 	return joined
 }
 
+// jsExternalImports returns specifiers from import statements that do not resolve
+// to an in-repo module (bare specifiers not starting with ".").
+func jsExternalImports(root *sitter.Node, src []byte, moduleSet map[string]bool) []string {
+	seen := map[string]bool{}
+	var result []string
+	count := int(root.ChildCount())
+	for i := 0; i < count; i++ {
+		child := root.Child(i)
+		if child == nil || child.Type() != "import_statement" {
+			continue
+		}
+		srcNode := child.ChildByFieldName("source")
+		if srcNode == nil {
+			continue
+		}
+		specifier := jsStringValue(srcNode, src)
+		// Bare specifier (not relative) and not in moduleSet -> external.
+		if strings.HasPrefix(specifier, ".") {
+			continue
+		}
+		if seen[specifier] {
+			continue
+		}
+		seen[specifier] = true
+		result = append(result, specifier)
+	}
+	return result
+}
+
 // processFile emits all entities, edges, and chunks for one JavaScript file.
 func (j jsAnalyzer) processFile(
 	relPath string,
@@ -361,6 +390,7 @@ func (j jsAnalyzer) processFile(
 	moduleDefs map[string]string,
 	importMap map[string]string,
 	repoIndex map[string][]string,
+	moduleSet map[string]bool,
 	res *Result,
 ) {
 	modID := moduleID(relPath)
@@ -379,6 +409,18 @@ func (j jsAnalyzer) processFile(
 		Header:   fmt.Sprintf("[js_module] %s\nfile: %s", relPath, relPath),
 		Body:     string(src),
 	})
+
+	// Emit requires SymbolRows for unresolved external imports.
+	for _, specifier := range jsExternalImports(root, src, moduleSet) {
+		res.Symbols = append(res.Symbols, contract.SymbolRow{
+			Symbol:   specifier,
+			Lang:     "javascript",
+			Kind:     "module",
+			Role:     contract.RoleRequires,
+			EntityID: modID,
+			SrcFile:  relPath,
+		})
+	}
 
 	// Emit require()-based import edges: importMap values that are js:module: IDs
 	// came from CommonJS require() bindings resolved by jsCollectRequireImports.
@@ -438,13 +480,33 @@ func (j jsAnalyzer) processFile(
 				if nameNode == nil {
 					continue
 				}
-				j.emitFunc(relPath, nameNode.Content(src), false, src, inner, moduleDefs, importMap, repoIndex, modID, res)
+				name := nameNode.Content(src)
+				j.emitFunc(relPath, name, false, src, inner, moduleDefs, importMap, repoIndex, modID, res)
+				// provides SymbolRow for exported function.
+				res.Symbols = append(res.Symbols, contract.SymbolRow{
+					Symbol:   relPath + "::" + name,
+					Lang:     "javascript",
+					Kind:     "func",
+					Role:     contract.RoleProvides,
+					EntityID: funcID(relPath, name),
+					SrcFile:  relPath,
+				})
 			case "class_declaration":
 				nameNode := inner.ChildByFieldName("name")
 				if nameNode == nil {
 					continue
 				}
-				j.emitClass(relPath, nameNode.Content(src), src, inner, modID, res)
+				name := nameNode.Content(src)
+				j.emitClass(relPath, name, src, inner, modID, res)
+				// provides SymbolRow for exported class.
+				res.Symbols = append(res.Symbols, contract.SymbolRow{
+					Symbol:   relPath + "::" + name,
+					Lang:     "javascript",
+					Kind:     "class",
+					Role:     contract.RoleProvides,
+					EntityID: classID(relPath, name),
+					SrcFile:  relPath,
+				})
 			}
 
 		case "class_declaration":

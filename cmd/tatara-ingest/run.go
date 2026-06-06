@@ -18,12 +18,13 @@ import (
 var errMissingRepoRoot = errors.New("--repo-root is required")
 
 type options struct {
-	repoRoot     string
-	repoName     string
-	since        string
-	full         bool
-	baseURL      string
-	pollInterval time.Duration
+	repoRoot        string
+	repoName        string
+	since           string
+	full            bool
+	baseURL         string
+	pollInterval    time.Duration
+	crossRepoPrefix string
 }
 
 func run(ctx context.Context, o options, hc *http.Client) error {
@@ -32,7 +33,7 @@ func run(ctx context.Context, o options, hc *http.Client) error {
 	if err != nil {
 		return err
 	}
-	reg := analyze.Default()
+	reg := analyze.Default(o.crossRepoPrefix)
 	groups := reg.Group(files)
 
 	var agg analyze.Result
@@ -49,13 +50,14 @@ func run(ctx context.Context, o options, hc *http.Client) error {
 		agg.Entities = append(agg.Entities, res.Entities...)
 		agg.Edges = append(agg.Edges, res.Edges...)
 		agg.Chunks = append(agg.Chunks, res.Chunks...)
+		agg.Symbols = append(agg.Symbols, res.Symbols...)
 	}
 
 	commit := headCommit(o.repoRoot)
 	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval))
 	if _, err := cl.PushGraph(ctx, contract.GraphPush{
 		Repo: o.repoName, Commit: commit, Files: files,
-		Entities: agg.Entities, Edges: agg.Edges,
+		Entities: agg.Entities, Edges: agg.Edges, Symbols: agg.Symbols,
 	}); err != nil {
 		return err
 	}
@@ -65,7 +67,8 @@ func run(ctx context.Context, o options, hc *http.Client) error {
 	slog.Info("ingest complete",
 		"repo", o.repoName, "files", len(files),
 		"entities", len(agg.Entities), "edges", len(agg.Edges),
-		"chunks", len(agg.Chunks), "duration_ms", time.Since(start).Milliseconds())
+		"chunks", len(agg.Chunks), "symbols", len(agg.Symbols),
+		"duration_ms", time.Since(start).Milliseconds())
 	return nil
 }
 

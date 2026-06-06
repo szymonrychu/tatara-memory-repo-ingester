@@ -9,7 +9,7 @@ import (
 )
 
 func TestDefaultRegistryPrecedence(t *testing.T) {
-	reg := analyze.Default()
+	reg := analyze.Default("github.com/szymonrychu/")
 	g := reg.Group([]string{
 		"main.go", "app.py", "web.js", "main.tf",
 		"mychart/templates/deployment.yaml", "README.md",

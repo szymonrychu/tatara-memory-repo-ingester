@@ -148,6 +148,58 @@ func TestJavaScriptAnalyzer_RequireImport(t *testing.T) {
 	require.True(t, imp, "expected cjs_consumer.js imports src/util.js via require() with .js appended")
 }
 
+// TestJavaScriptAnalyzer_ProvidesSymbols: exported functions emit provides SymbolRows.
+func TestJavaScriptAnalyzer_ProvidesSymbols(t *testing.T) {
+	a := analyze.NewJavaScript()
+
+	res, err := a.Analyze(context.Background(), "testdata/js", []string{"src/ext_import.js"})
+	require.NoError(t, err)
+
+	// MyComponent is exported -> provides SymbolRow.
+	prov, ok := findSymbol(res.Symbols, contract.RoleProvides, "src/ext_import.js::MyComponent")
+	require.True(t, ok, "expected provides SymbolRow for src/ext_import.js::MyComponent")
+	require.Equal(t, "javascript", prov.Lang)
+	require.Equal(t, "func", prov.Kind)
+	require.Equal(t, "js:func:src/ext_import.js::MyComponent", prov.EntityID)
+	require.Equal(t, "src/ext_import.js", prov.SrcFile)
+
+	// All SrcFile values must be within the files scope.
+	for _, s := range res.Symbols {
+		require.Equal(t, "src/ext_import.js", s.SrcFile,
+			"SymbolRow %q has SrcFile outside files set", s.Symbol)
+	}
+}
+
+// TestJavaScriptAnalyzer_RequiresSymbols: unresolved external imports emit requires SymbolRows.
+func TestJavaScriptAnalyzer_RequiresSymbols(t *testing.T) {
+	a := analyze.NewJavaScript()
+
+	res, err := a.Analyze(context.Background(), "testdata/js", []string{"src/ext_import.js"})
+	require.NoError(t, err)
+
+	// 'react' is not in-repo -> requires SymbolRow.
+	req, ok := findSymbol(res.Symbols, contract.RoleRequires, "react")
+	require.True(t, ok, "expected requires SymbolRow for 'react'")
+	require.Equal(t, "javascript", req.Lang)
+	require.Equal(t, "module", req.Kind)
+	require.Equal(t, "src/ext_import.js", req.SrcFile)
+}
+
+// TestJavaScriptAnalyzer_ClassProvides: exported class emits a provides SymbolRow with kind "class".
+func TestJavaScriptAnalyzer_ClassProvides(t *testing.T) {
+	a := analyze.NewJavaScript()
+
+	res, err := a.Analyze(context.Background(), "testdata/js", []string{"src/export_class.js"})
+	require.NoError(t, err)
+
+	prov, ok := findSymbol(res.Symbols, contract.RoleProvides, "src/export_class.js::MyService")
+	require.True(t, ok, "expected provides SymbolRow for exported class MyService")
+	require.Equal(t, "javascript", prov.Lang)
+	require.Equal(t, "class", prov.Kind)
+	require.Equal(t, "js:class:src/export_class.js::MyService", prov.EntityID)
+	require.Equal(t, "src/export_class.js", prov.SrcFile)
+}
+
 // TestJavaScriptAnalyzer_Unresolved: a call to a plain undefined identifier produces no calls edge
 // and leaves a dangling_call property on the caller.
 func TestJavaScriptAnalyzer_Unresolved(t *testing.T) {

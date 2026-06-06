@@ -22,13 +22,30 @@ type Edge struct {
 	Properties map[string]string `json:"properties,omitempty"`
 }
 
+// Symbol roles.
+const (
+	RoleProvides = "provides"
+	RoleRequires = "requires"
+)
+
+// SymbolRow is one cross-repo symbol emission (mirrors tatara-memory's SymbolRow).
+type SymbolRow struct {
+	Symbol   string `json:"symbol"`
+	Lang     string `json:"lang"`
+	Kind     string `json:"kind"`
+	Role     string `json:"role"`
+	EntityID string `json:"entity_id"`
+	SrcFile  string `json:"src_file"`
+}
+
 // GraphPush is one /code-graph:bulk request.
 type GraphPush struct {
-	Repo     string   `json:"repo"`
-	Commit   string   `json:"commit,omitempty"`
-	Files    []string `json:"files"`
-	Entities []Entity `json:"entities"`
-	Edges    []Edge   `json:"edges"`
+	Repo     string      `json:"repo"`
+	Commit   string      `json:"commit,omitempty"`
+	Files    []string    `json:"files"`
+	Entities []Entity    `json:"entities"`
+	Edges    []Edge      `json:"edges"`
+	Symbols  []SymbolRow `json:"symbols,omitempty"`
 }
 
 // PushResult is the /code-graph:bulk response.

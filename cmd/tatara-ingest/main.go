@@ -37,6 +37,7 @@ func realMain() error {
 		o.baseURL = cfg.BaseURL
 	}
 	o.pollInterval = cfg.PollInterval
+	o.crossRepoPrefix = cfg.CrossRepoPrefix
 
 	ctx := context.Background()
 	hc := http.DefaultClient

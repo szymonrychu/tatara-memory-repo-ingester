@@ -16,10 +16,15 @@ type Config struct {
 	OIDCAudience     string
 	PollInterval     time.Duration
 	HTTPTimeout      time.Duration
+	CrossRepoPrefix  string
 }
 
 // Load builds a Config from a key lookup function (kebab-case keys).
 func Load(getenv func(string) string) (Config, error) {
+	crossRepoPrefix := getenv("cross-repo-prefix")
+	if crossRepoPrefix == "" {
+		crossRepoPrefix = "github.com/szymonrychu/"
+	}
 	c := Config{
 		BaseURL:          strings.TrimRight(getenv("base-url"), "/"),
 		OIDCIssuer:       getenv("oidc-issuer"),
@@ -28,6 +33,7 @@ func Load(getenv func(string) string) (Config, error) {
 		OIDCAudience:     getenv("oidc-audience"),
 		PollInterval:     2 * time.Second,
 		HTTPTimeout:      60 * time.Second,
+		CrossRepoPrefix:  crossRepoPrefix,
 	}
 	if v := getenv("poll-interval"); v != "" {
 		d, err := time.ParseDuration(v)

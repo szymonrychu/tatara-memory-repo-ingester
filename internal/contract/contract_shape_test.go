@@ -43,6 +43,37 @@ func TestIngestItemJSONShape(t *testing.T) {
 	require.ElementsMatch(t, []string{"idempotency_key", "text", "metadata"}, keys(got))
 }
 
+func TestSymbolRowJSONShape(t *testing.T) {
+	s := contract.SymbolRow{
+		Symbol:   "github.com/szymonrychu/other.Func",
+		Lang:     "go",
+		Kind:     "func",
+		Role:     contract.RoleProvides,
+		EntityID: "go:func:github.com/szymonrychu/other.Func",
+		SrcFile:  "pkg/pkg.go",
+	}
+	b, err := json.Marshal(s)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	require.ElementsMatch(t, []string{"symbol", "lang", "kind", "role", "entity_id", "src_file"}, keys(got))
+}
+
+func TestGraphPushSymbolsOmitEmpty(t *testing.T) {
+	p := contract.GraphPush{
+		Repo:     "tatara-cli",
+		Files:    []string{"a.go"},
+		Entities: []contract.Entity{},
+		Edges:    []contract.Edge{},
+	}
+	b, err := json.Marshal(p)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	_, hasSymbols := got["symbols"]
+	require.False(t, hasSymbols, "symbols key must be absent when empty")
+}
+
 func keys(m map[string]any) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
