@@ -14,6 +14,7 @@ type Result struct {
 	Entities []contract.Entity
 	Edges    []contract.Edge
 	Chunks   []contract.Chunk
+	Symbols  []contract.SymbolRow
 }
 
 // Analyzer extracts a code graph and chunks for one language/file class.

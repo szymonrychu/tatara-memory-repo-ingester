@@ -32,4 +32,12 @@ func TestLoadDefaults(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2*time.Second, c.PollInterval)
 	require.Equal(t, 60*time.Second, c.HTTPTimeout)
+	require.Equal(t, "github.com/szymonrychu/", c.CrossRepoPrefix)
+}
+
+func TestLoadCrossRepoPrefix(t *testing.T) {
+	env := map[string]string{"cross-repo-prefix": "example.com/org/"}
+	c, err := config.Load(func(k string) string { return env[k] })
+	require.NoError(t, err)
+	require.Equal(t, "example.com/org/", c.CrossRepoPrefix)
 }
