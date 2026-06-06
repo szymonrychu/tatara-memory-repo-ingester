@@ -82,7 +82,10 @@ func (p pythonAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 		// Build import map: local name -> entityID resolved via tracked imports.
 		importMap := pyImportMap(pf.root, pf.src, repoIndex)
 
-		p.processFile(pf.relPath, pf.moduleFQN, pf.src, pf.root, moduleDefs, importMap, repoIndex, &res)
+		// Collect unresolved external imports for requires SymbolRows.
+		extImports := pyExternalImports(pf.root, pf.src, repoIndex)
+
+		p.processFile(pf.relPath, pf.moduleFQN, pf.src, pf.root, moduleDefs, importMap, extImports, repoIndex, &res)
 	}
 
 	return res, nil
@@ -199,6 +202,7 @@ func (p pythonAnalyzer) processFile(
 	src []byte, root *sitter.Node,
 	moduleDefs map[string]string,
 	importMap map[string]string,
+	extImports []string,
 	repoIndex map[string][]string,
 	res *Result,
 ) {
@@ -220,21 +224,133 @@ func (p pythonAnalyzer) processFile(
 		Body:     string(src),
 	})
 
+	// Emit requires SymbolRows for unresolved external imports.
+	for _, imp := range extImports {
+		res.Symbols = append(res.Symbols, contract.SymbolRow{
+			Symbol:   imp,
+			Lang:     "python",
+			Kind:     "module",
+			Role:     contract.RoleRequires,
+			EntityID: moduleID,
+			SrcFile:  relPath,
+		})
+	}
+
 	count := int(root.NamedChildCount())
 	for i := 0; i < count; i++ {
 		child := root.NamedChild(i)
 		switch child.Type() {
 		case "function_definition":
 			p.emitFunc(relPath, moduleFQN, moduleID, "", false, src, child, moduleDefs, importMap, repoIndex, res)
+			// provides SymbolRow for top-level function.
+			if nameNode := child.ChildByFieldName("name"); nameNode != nil {
+				fname := nameNode.Content(src)
+				funcFQN := moduleFQN + "." + fname
+				res.Symbols = append(res.Symbols, contract.SymbolRow{
+					Symbol:   funcFQN,
+					Lang:     "python",
+					Kind:     "func",
+					Role:     contract.RoleProvides,
+					EntityID: "py:func:" + funcFQN,
+					SrcFile:  relPath,
+				})
+			}
 		case "decorated_definition":
 			inner := child.ChildByFieldName("definition")
 			if inner != nil && inner.Type() == "function_definition" {
 				p.emitFunc(relPath, moduleFQN, moduleID, "", true, src, inner, moduleDefs, importMap, repoIndex, res)
+				// provides SymbolRow for decorated top-level function.
+				if nameNode := inner.ChildByFieldName("name"); nameNode != nil {
+					fname := nameNode.Content(src)
+					funcFQN := moduleFQN + "." + fname
+					res.Symbols = append(res.Symbols, contract.SymbolRow{
+						Symbol:   funcFQN,
+						Lang:     "python",
+						Kind:     "func",
+						Role:     contract.RoleProvides,
+						EntityID: "py:func:" + funcFQN,
+						SrcFile:  relPath,
+					})
+				}
 			}
 		case "class_definition":
 			p.emitClass(relPath, moduleFQN, moduleID, src, child, moduleDefs, importMap, repoIndex, res)
+			// provides SymbolRow for top-level class.
+			if nameNode := child.ChildByFieldName("name"); nameNode != nil {
+				cname := nameNode.Content(src)
+				classFQN := moduleFQN + "." + cname
+				res.Symbols = append(res.Symbols, contract.SymbolRow{
+					Symbol:   classFQN,
+					Lang:     "python",
+					Kind:     "class",
+					Role:     contract.RoleProvides,
+					EntityID: "py:class:" + classFQN,
+					SrcFile:  relPath,
+				})
+			}
 		}
 	}
+}
+
+// pyExternalImports returns the module/package names from import statements that do not
+// resolve to any known entity in the repo (i.e. unresolved external dependencies).
+func pyExternalImports(root *sitter.Node, src []byte, repoIndex map[string][]string) []string {
+	seen := map[string]bool{}
+	var result []string
+	count := int(root.NamedChildCount())
+	for i := 0; i < count; i++ {
+		child := root.NamedChild(i)
+		switch child.Type() {
+		case "import_statement":
+			// import requests  or  import os.path
+			nc := int(child.NamedChildCount())
+			for j := 0; j < nc; j++ {
+				n := child.NamedChild(j)
+				if n == nil {
+					continue
+				}
+				name := n.Content(src)
+				// top-level module name (before first dot)
+				topLevel := strings.SplitN(name, ".", 2)[0]
+				if len(repoIndex[topLevel]) == 0 && !seen[topLevel] {
+					seen[topLevel] = true
+					result = append(result, topLevel)
+				}
+			}
+		case "import_from_statement":
+			// from flask import Flask -> module is "flask"
+			modNode := child.ChildByFieldName("module_name")
+			if modNode == nil {
+				continue
+			}
+			modName := modNode.Content(src)
+			topLevel := strings.SplitN(modName, ".", 2)[0]
+			// Check if any name imported from this module resolves in repoIndex.
+			// If the module itself (top-level) has no repo entity, it's external.
+			if len(repoIndex[topLevel]) == 0 && !seen[topLevel] {
+				// Also make sure the imported names are not resolvable.
+				// If all imported names are unresolvable, the whole module is external.
+				allUnresolved := true
+				nc := int(child.NamedChildCount())
+				for j := 0; j < nc; j++ {
+					n := child.NamedChild(j)
+					if n == child.ChildByFieldName("module_name") {
+						continue
+					}
+					localName := n.Content(src)
+					if len(repoIndex[localName]) > 0 {
+						allUnresolved = false
+						break
+					}
+				}
+				if allUnresolved {
+					seen[topLevel] = true
+					result = append(result, topLevel)
+				}
+			}
+		}
+	}
+	return result
 }
 
 // emitClass emits a py_class entity and its methods.

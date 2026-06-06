@@ -96,6 +96,50 @@ func TestPythonAmbiguousMultiDef(t *testing.T) {
 	require.Equal(t, "0.2", edgeB.Properties["confidence"])
 }
 
+func TestPythonProvidesSymbols(t *testing.T) {
+	a := analyze.NewPython()
+
+	res, err := a.Analyze(context.Background(), "testdata/py", []string{"pkg/mod.py"})
+	require.NoError(t, err)
+
+	// pkg.mod has top-level def g and def f - both should produce provides SymbolRows.
+	provG, ok := findSymbol(res.Symbols, contract.RoleProvides, "pkg.mod.g")
+	require.True(t, ok, "expected provides SymbolRow for pkg.mod.g")
+	require.Equal(t, "python", provG.Lang)
+	require.Equal(t, "func", provG.Kind)
+	require.Equal(t, "py:func:pkg.mod.g", provG.EntityID)
+	require.Equal(t, "pkg/mod.py", provG.SrcFile)
+
+	provF, okF := findSymbol(res.Symbols, contract.RoleProvides, "pkg.mod.f")
+	require.True(t, okF, "expected provides SymbolRow for pkg.mod.f")
+	require.Equal(t, "pkg/mod.py", provF.SrcFile)
+
+	// All SrcFile values must be within the files scope.
+	for _, s := range res.Symbols {
+		require.Equal(t, "pkg/mod.py", s.SrcFile,
+			"SymbolRow %q has SrcFile outside files set", s.Symbol)
+	}
+}
+
+func TestPythonRequiresSymbols(t *testing.T) {
+	a := analyze.NewPython()
+
+	res, err := a.Analyze(context.Background(), "testdata/py", []string{"pkg/ext_import.py"})
+	require.NoError(t, err)
+
+	// pkg/ext_import.py has: import requests; from flask import Flask
+	// Both are unresolved external imports -> requires SymbolRows.
+	reqReq, ok := findSymbol(res.Symbols, contract.RoleRequires, "requests")
+	require.True(t, ok, "expected requires SymbolRow for 'requests'")
+	require.Equal(t, "python", reqReq.Lang)
+	require.Equal(t, "module", reqReq.Kind)
+	require.Equal(t, "pkg/ext_import.py", reqReq.SrcFile)
+
+	reqFlask, okF := findSymbol(res.Symbols, contract.RoleRequires, "flask")
+	require.True(t, okF, "expected requires SymbolRow for 'flask' (from flask import Flask)")
+	require.Equal(t, "pkg/ext_import.py", reqFlask.SrcFile)
+}
+
 func TestPythonDegradedByDecorator(t *testing.T) {
 	a := analyze.NewPython()
 
