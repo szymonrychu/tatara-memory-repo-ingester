@@ -12,3 +12,6 @@
 - 2026-06-06: contract types are mirrored from tatara-memory's internal/codegraph
   (cannot import an internal package across modules); contract_shape_test.go
   guards the JSON shapes against drift.
+- 2026-06-06: analyzers MUST emit repo-relative paths (filepath.Rel(absRepoRoot, absFile)) and filter all entity/edge/chunk emission to the files arg - tatara-memory /code-graph:bulk rejects any push where FilePath or SrcFile is not in the push's files set.
+- 2026-06-06: JS analyzer TDD gaps closed: require() import edge emission (processFile emits RelImports for js:module: importMap values), unresolved-tier dangling_call assertion, and degraded/dynamic both pinned as explicit assertions. jsCollectRequireImports switched to O(1) moduleSet map instead of O(n) repoIndex value scan.
+- 2026-06-06: Python M3 resolution ladder complete. Analyze() does a two-pass: first pass parses all files and builds a repo-wide name->[]entityID index; second pass resolves calls via scoped(0.85)->imported(0.7)->global(0.45)->ambiguous(0.2)->dangling. Decorated functions (decorated_definition node) get degraded_by=decorator and confidence capped at 0.45. Dead sitter.NewParser() allocation removed. import_from_statement tracked for imported_name_match; bare import_statement skipped (calls via module.attr are attribute nodes -> dangling).

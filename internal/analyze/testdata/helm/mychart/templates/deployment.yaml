@@ -1,0 +1,2 @@
+image: {{ .Values.image.repository }}
+labels: {{ include "mychart.labels" . }}
