@@ -31,31 +31,31 @@ func findEdge(edges []contract.Edge, rel, from, to string) (contract.Edge, bool)
 // TestClassifyRef tests the pure helper via the exported shim.
 func TestClassifyRef(t *testing.T) {
 	cases := []struct {
-		name        string
-		objPkgPath  string
-		modulePath  string
-		prefix      string
-		wantEmit    bool
-		wantSymbol  string
+		name       string
+		objPkgPath string
+		modulePath string
+		prefix     string
+		wantEmit   bool
+		wantSymbol string
 	}{
 		{
-			name: "in-module ref",
+			name:       "in-module ref",
 			objPkgPath: "example.com/sample/pkg", modulePath: "example.com/sample",
 			prefix: "github.com/szymonrychu/", wantEmit: false,
 		},
 		{
-			name: "external under prefix",
+			name:       "external under prefix",
 			objPkgPath: "github.com/szymonrychu/other/pkg", modulePath: "example.com/sample",
 			prefix: "github.com/szymonrychu/", wantEmit: true,
 			wantSymbol: "github.com/szymonrychu/other/pkg.DoThing",
 		},
 		{
-			name: "stdlib - no emit",
+			name:       "stdlib - no emit",
 			objPkgPath: "fmt", modulePath: "example.com/sample",
 			prefix: "github.com/szymonrychu/", wantEmit: false,
 		},
 		{
-			name: "third-party no prefix match",
+			name:       "third-party no prefix match",
 			objPkgPath: "github.com/some-other/lib", modulePath: "example.com/sample",
 			prefix: "github.com/szymonrychu/", wantEmit: false,
 		},
