@@ -23,3 +23,4 @@
   over the name token only (single line), not the function body, so reference edges
   inside a body may not attribute and can drop. Entities (one per definition) are solid;
   reference-edge coverage needs validation against a real scip-go index. Tracked in ROADMAP.
+- 2026-06-07: Runtime image swapped from distroless/cc-debian12:nonroot to golang:1.26-bookworm. Distroless had no git/go; ingest Jobs need to clone repos and run scip-go (Go toolchain). ENV GOTOOLCHAIN=auto added so ingested repos pinned to a newer Go still work. USER nonroot dropped (pod securityContext sets runAsUser).
