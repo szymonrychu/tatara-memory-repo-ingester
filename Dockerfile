@@ -16,7 +16,7 @@ RUN CGO_ENABLED=1 GOOS=linux go build -trimpath \
       -X github.com/szymonrychu/tatara-memory-repo-ingester/internal/version.Date=${DATE}" \
     -o /out/tatara-ingest ./cmd/tatara-ingest
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM golang:1.26-bookworm
+ENV GOTOOLCHAIN=auto
 COPY --from=builder /out/tatara-ingest /tatara-ingest
-USER nonroot:nonroot
 ENTRYPOINT ["/tatara-ingest"]
