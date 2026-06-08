@@ -18,5 +18,11 @@ RUN CGO_ENABLED=1 GOOS=linux go build -trimpath \
 
 FROM golang:1.26-bookworm
 ENV GOTOOLCHAIN=auto
+# kubectl: the operator's ingest Job runs `kubectl patch configmap <result>` (in-cluster
+# SA auth) to report the ingested HEAD back to the operator. Pinned to the cluster minor.
+ARG KUBECTL_VERSION=v1.33.0
+RUN curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+    && chmod +x /usr/local/bin/kubectl \
+    && kubectl version --client
 COPY --from=builder /out/tatara-ingest /usr/local/bin/tatara-ingest
 ENTRYPOINT ["tatara-ingest"]
