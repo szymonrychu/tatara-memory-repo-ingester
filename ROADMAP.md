@@ -15,3 +15,7 @@ Open:
 - Prometheus Pushgateway emitter for batch counts.
 - Deploy-time: Keycloak service-account client; Harbor image + infra-helmfile
   tatara-bucket Job release (deploy from main only, rule 10).
+- Drop the kubectl dependency: report the ingested HEAD without `kubectl` in the
+  image (write SHA to the Pod termination-log and have the operator read it, or
+  have the operator resolve HEAD from the SCM API). Removes the 0.2.2 kubectl
+  bundle and keeps the image lean.

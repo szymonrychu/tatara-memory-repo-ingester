@@ -1,5 +1,16 @@
 # MEMORY.md - tatara-memory-repo-ingester
 
+- 2026-06-08 (0.2.2): Bundled `kubectl` (pinned v1.33, the cluster minor) into the
+  runtime image. The operator's ingest Job runs `tatara-ingest && kubectl patch
+  configmap <result> -p {sha}` (in-cluster SA auth) to report the ingested HEAD;
+  the operator reads that SHA to flip the Repository to `Ingested`. The image had
+  no kubectl, so the patch failed `kubectl: not found` AFTER a successful ingest
+  -> Job exited non-zero -> repo never recorded its commit, stuck `Ingesting`,
+  operator relaunched in a loop. Side effects (graph + chunks) already landed;
+  only the report-back failed. Surfaced only once the chunk path drained end-to-
+  end (tatara-memory 0.2.2/0.2.3 fixes). Cleaner long-term: ingester self-reports
+  HEAD via the Pod termination-log (no kubectl in image) or the operator resolves
+  HEAD from the SCM API - see ROADMAP.
 - 2026-06-08 (0.2.1): Runtime binary moved from `/tatara-ingest` to
   `/usr/local/bin/tatara-ingest` (on PATH); ENTRYPOINT now bare `tatara-ingest`.
   The operator's ingest Job runs `/bin/sh -c "tatara-ingest ..."` (bare name via
