@@ -1,5 +1,12 @@
 # MEMORY.md - tatara-memory-repo-ingester
 
+- 2026-06-08 (0.2.1): Runtime binary moved from `/tatara-ingest` to
+  `/usr/local/bin/tatara-ingest` (on PATH); ENTRYPOINT now bare `tatara-ingest`.
+  The operator's ingest Job runs `/bin/sh -c "tatara-ingest ..."` (bare name via
+  PATH); the root-level binary gave exit 127 `tatara-ingest: not found` on the
+  first real dogfood ingest. Surfaced only at runtime under the operator (the
+  image's own ENTRYPOINT worked, masking it).
+
 - 2026-06-06: New repo (phase 3 sub-project B). Walks a repo, emits the code
   graph + semantic chunks to tatara-memory. Spec in the parent tatara repo at
   docs/superpowers/specs/2026-06-06-tatara-memory-repo-ingester-design.md.

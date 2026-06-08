@@ -18,5 +18,5 @@ RUN CGO_ENABLED=1 GOOS=linux go build -trimpath \
 
 FROM golang:1.26-bookworm
 ENV GOTOOLCHAIN=auto
-COPY --from=builder /out/tatara-ingest /tatara-ingest
-ENTRYPOINT ["/tatara-ingest"]
+COPY --from=builder /out/tatara-ingest /usr/local/bin/tatara-ingest
+ENTRYPOINT ["tatara-ingest"]
