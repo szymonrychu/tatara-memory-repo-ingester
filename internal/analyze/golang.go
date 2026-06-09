@@ -68,6 +68,10 @@ func (g goAnalyzer) Analyze(ctx context.Context, repoRoot string, files []string
 	if err != nil {
 		return Result{}, fmt.Errorf("filepath.Abs(%q): %w", repoRoot, err)
 	}
+	// Resolve symlinks so that filepath.Rel works correctly on macOS where /tmp -> /private/tmp.
+	if resolved, err2 := filepath.EvalSymlinks(absRepoRoot); err2 == nil {
+		absRepoRoot = resolved
+	}
 
 	// Build scope set from caller-supplied file list (repo-relative paths).
 	scope := make(map[string]bool, len(files))
@@ -193,9 +197,11 @@ func (g goAnalyzer) processPackage(
 			// Determine signature string.
 			sig := funcSignature(pkg.Fset, pkg.TypesInfo, fd)
 
+			lineStart := pkg.Fset.Position(fd.Pos()).Line
+			lineEnd := pkg.Fset.Position(fd.End()).Line
 			props := map[string]string{
-				"line_start": fmt.Sprintf("%d", pkg.Fset.Position(fd.Pos()).Line),
-				"line_end":   fmt.Sprintf("%d", pkg.Fset.Position(fd.End()).Line),
+				"line_start": fmt.Sprintf("%d", lineStart),
+				"line_end":   fmt.Sprintf("%d", lineEnd),
 				"signature":  sig,
 				"exported":   fmt.Sprintf("%v", ast.IsExported(fd.Name.Name)),
 			}
@@ -205,6 +211,8 @@ func (g goAnalyzer) processPackage(
 				Name:       name,
 				Type:       entityType,
 				FilePath:   rel,
+				LineStart:  lineStart,
+				LineEnd:    lineEnd,
 				Properties: props,
 			})
 
