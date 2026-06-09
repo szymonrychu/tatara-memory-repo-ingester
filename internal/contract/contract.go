@@ -56,15 +56,41 @@ type Hyperedge struct {
 	Properties      map[string]string `json:"properties,omitempty"`
 }
 
-// GraphPush is one /code-graph:bulk request.
+// GraphPush is one /code-graph:bulk request. Extractor tags the origin of every
+// row in this push ("" or "ast" for the AST extractor, "semantic" for the LLM
+// stage); reconcile scopes its per-src_file deletes by it so the two origins do
+// not clobber each other. FileSHAs (path->content_sha) is set on the semantic
+// push to update the server's extraction cache.
 type GraphPush struct {
-	Repo       string      `json:"repo"`
-	Commit     string      `json:"commit,omitempty"`
-	Files      []string    `json:"files"`
-	Entities   []Entity    `json:"entities"`
-	Edges      []Edge      `json:"edges"`
-	Symbols    []SymbolRow `json:"symbols,omitempty"`
-	Hyperedges []Hyperedge `json:"hyperedges,omitempty"` // empty until Phase 2
+	Repo       string            `json:"repo"`
+	Commit     string            `json:"commit,omitempty"`
+	Extractor  string            `json:"extractor,omitempty"`
+	Files      []string          `json:"files"`
+	Entities   []Entity          `json:"entities"`
+	Edges      []Edge            `json:"edges"`
+	Symbols    []SymbolRow       `json:"symbols,omitempty"`
+	Hyperedges []Hyperedge       `json:"hyperedges,omitempty"`
+	FileSHAs   map[string]string `json:"file_shas,omitempty"`
+}
+
+// Extractor origin tags written onto every row of a GraphPush.
+const (
+	ExtractorAST      = "ast"
+	ExtractorSemantic = "semantic"
+)
+
+// FileSHA pairs a repo-relative path with the sha256 of its working-tree content.
+type FileSHA struct {
+	Path       string `json:"path"`
+	ContentSHA string `json:"content_sha"`
+}
+
+// SemanticMissesRequest is the POST /code-graph/semantic-misses body: the set of
+// analyzed files with their current content_sha. The server returns the subset
+// whose stored content_sha differs or is absent (cache miss -> needs extraction).
+type SemanticMissesRequest struct {
+	Repo  string    `json:"repo"`
+	Files []FileSHA `json:"files"`
 }
 
 // PushResult is the /code-graph:bulk response.
