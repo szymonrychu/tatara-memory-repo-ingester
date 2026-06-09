@@ -279,7 +279,6 @@ func extractChunk(ctx context.Context, repo string, client *llm.Client, ck seman
 		FileList:    strings.TrimRight(fl.String(), "\n"),
 		ChunkNum:    chunkNum,
 		TotalChunks: total,
-		ChunkPath:   "/dev/null",
 	})
 	out, err := client.Complete(ctx, prompt)
 	if err != nil {

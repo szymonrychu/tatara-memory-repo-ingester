@@ -22,22 +22,29 @@ func TestBuildPromptSubstitutesPlaceholders(t *testing.T) {
 		FileList:    "- a.go\n- b.go",
 		ChunkNum:    2,
 		TotalChunks: 5,
-		ChunkPath:   "/tmp/chunk-2.json",
 	})
 	require.Contains(t, got, "Files (chunk 2 of 5):")
 	require.Contains(t, got, "- a.go\n- b.go")
-	require.Contains(t, got, "/tmp/chunk-2.json")
 	// Placeholders must be fully consumed.
 	require.NotContains(t, got, "FILE_LIST")
 	require.NotContains(t, got, "CHUNK_NUM")
 	require.NotContains(t, got, "TOTAL_CHUNKS")
-	require.NotContains(t, got, "CHUNK_PATH")
 	// DEEP_MODE is off: the literal token must not leak into the prompt.
 	require.NotContains(t, got, "DEEP_MODE (if --mode deep was given)")
 }
 
+func TestBuildPromptNoWriteToDiskInstruction(t *testing.T) {
+	got := BuildPrompt(PromptVars{FileList: "- a.go", ChunkNum: 1, TotalChunks: 1})
+	// Prompt must NOT contain the Write-to-disk instruction that was in the old graphify spec.
+	require.NotContains(t, got, "Write tool")
+	require.NotContains(t, got, "CHUNK_PATH")
+	require.NotContains(t, got, "write the JSON to disk")
+	// Must have the explicit return-as-content instruction.
+	require.Contains(t, got, "Return the JSON as your message content - do not write to disk, do not use any tool.")
+}
+
 func TestBuildPromptKeepsSchemaIntact(t *testing.T) {
-	got := BuildPrompt(PromptVars{FileList: "- a.go", ChunkNum: 1, TotalChunks: 1, ChunkPath: "/tmp/c.json"})
+	got := BuildPrompt(PromptVars{FileList: "- a.go", ChunkNum: 1, TotalChunks: 1})
 	require.Contains(t, got, "Generate the extraction JSON matching this schema exactly:")
 	// The schema JSON enumerates semantically_similar_to in the relation pipe-list; the prose
 	// line uses backtick quoting (verified by TestExtractionSpecProseUsesBackticks).

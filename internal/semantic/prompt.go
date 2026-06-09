@@ -17,16 +17,14 @@ type PromptVars struct {
 	FileList    string
 	ChunkNum    int
 	TotalChunks int
-	ChunkPath   string
 }
 
 // BuildPrompt returns the verbatim extraction-spec prompt with FILE_LIST,
-// CHUNK_NUM, TOTAL_CHUNKS, and CHUNK_PATH substituted. DEEP_MODE is always off.
-// Longer tokens are listed first so CHUNK_PATH is not partially matched by CHUNK_NUM.
+// CHUNK_NUM, and TOTAL_CHUNKS substituted. DEEP_MODE is always off.
+// Longer tokens are listed first so TOTAL_CHUNKS is not partially matched by CHUNK_NUM.
 func BuildPrompt(v PromptVars) string {
 	r := strings.NewReplacer(
 		"TOTAL_CHUNKS", strconv.Itoa(v.TotalChunks),
-		"CHUNK_PATH", v.ChunkPath,
 		"CHUNK_NUM", strconv.Itoa(v.ChunkNum),
 		"FILE_LIST", v.FileList,
 	)
