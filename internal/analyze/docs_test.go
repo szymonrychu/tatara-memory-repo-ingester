@@ -10,6 +10,34 @@ import (
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/contract"
 )
 
+func TestDocsAnalyzerCapturesFrontmatter(t *testing.T) {
+	a := analyze.NewDocs()
+	res, err := a.Analyze(context.Background(), "testdata/docs", []string{"front.md"})
+	require.NoError(t, err)
+	require.Len(t, res.Entities, 1)
+	e := res.Entities[0]
+	require.Equal(t, "https://example.com/origin", e.SourceURL)
+	require.Equal(t, "Alice Example", e.Author)
+	require.Equal(t, "2026-06-09T12:00:00Z", e.CapturedAt)
+
+	require.Len(t, res.Chunks, 1)
+	require.Contains(t, res.Chunks[0].Body, "This document came from elsewhere.")
+	require.NotContains(t, res.Chunks[0].Body, "source_url",
+		"frontmatter block must be stripped from the chunk body")
+}
+
+func TestDocsAnalyzerNoFrontmatter(t *testing.T) {
+	a := analyze.NewDocs()
+	res, err := a.Analyze(context.Background(), "testdata/docs", []string{"README.md"})
+	require.NoError(t, err)
+	require.Len(t, res.Entities, 1)
+	e := res.Entities[0]
+	require.Empty(t, e.SourceURL)
+	require.Empty(t, e.Author)
+	require.Empty(t, e.CapturedAt)
+	require.Contains(t, res.Chunks[0].Body, "Some prose.")
+}
+
 func TestDocsAnalyzer(t *testing.T) {
 	a := analyze.NewDocs()
 	require.True(t, a.Match("README.md"))
