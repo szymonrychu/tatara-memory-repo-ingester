@@ -36,9 +36,7 @@ func TestPushChunksPollsToTerminal(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/memories:bulk":
-			var req struct {
-				Items []contract.IngestItem `json:"items"`
-			}
+			var req contract.BulkMemoriesRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 			require.Len(t, req.Items, 1)
 			w.WriteHeader(202)
@@ -54,7 +52,7 @@ func TestPushChunksPollsToTerminal(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
-	err := c.PushChunks(context.Background(), []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
+	err := c.PushChunks(context.Background(), nil, []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, polls, 2)
 }
@@ -70,6 +68,65 @@ func TestPushChunksPartialIsError(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
-	err := c.PushChunks(context.Background(), []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
+	err := c.PushChunks(context.Background(), nil, []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
 	require.Error(t, err)
+}
+
+func TestPushChunksSendsReconcileFiles(t *testing.T) {
+	var gotReq contract.BulkMemoriesRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/memories:bulk":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&gotReq))
+			w.WriteHeader(202)
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: contract.JobSucceeded, Total: 1, Done: 1})
+		case strings.HasPrefix(r.URL.Path, "/ingest-jobs/"):
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: contract.JobSucceeded, Total: 1, Done: 1})
+		}
+	}))
+	defer srv.Close()
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	err := c.PushChunks(context.Background(),
+		[]string{"a.go", "gone.go"},
+		[]contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"a.go", "gone.go"}, gotReq.ReconcileFiles)
+	require.Len(t, gotReq.Items, 1)
+}
+
+func TestPushChunksReconcileOnlyDeletion(t *testing.T) {
+	// A pure deletion: reconcile_files set, no items. Must still POST and reconcile.
+	var gotReq contract.BulkMemoriesRequest
+	var posted bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/memories:bulk":
+			posted = true
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&gotReq))
+			w.WriteHeader(202)
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: contract.JobSucceeded})
+		case strings.HasPrefix(r.URL.Path, "/ingest-jobs/"):
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: contract.JobSucceeded})
+		}
+	}))
+	defer srv.Close()
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	err := c.PushChunks(context.Background(), []string{"gone.go"}, nil)
+	require.NoError(t, err)
+	require.True(t, posted, "deletion-only reconcile must still POST /memories:bulk")
+	require.Equal(t, []string{"gone.go"}, gotReq.ReconcileFiles)
+	require.Empty(t, gotReq.Items)
+}
+
+func TestPushChunksNoopWhenNothingToDo(t *testing.T) {
+	var posted bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posted = true
+		w.WriteHeader(202)
+		_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: contract.JobSucceeded})
+	}))
+	defer srv.Close()
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	require.NoError(t, c.PushChunks(context.Background(), nil, nil))
+	require.False(t, posted, "no reconcile and no items must not POST")
 }
