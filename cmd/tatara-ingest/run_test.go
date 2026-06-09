@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	scipbindings "github.com/scip-code/scip/bindings/go/scip"
@@ -386,4 +387,209 @@ func TestRunIngestsFixtureRepo(t *testing.T) {
 	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
 	require.True(t, graphHit)
 	require.True(t, bulkHit)
+}
+
+func TestRunTagsASTPushWithExtractor(t *testing.T) {
+	dir := newGitRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.go"),
+		[]byte("package m\n\nfunc A() {}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/m\n\ngo 1.25\n"), 0o644))
+	commitAll(t, dir, "init")
+
+	var astPush contract.GraphPush
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph:bulk":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &astPush)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		default:
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	// No OPENAI_API_KEY -> semantic stage skipped, AST push still tagged "ast".
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, getenv: func(string) string { return "" }}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+	require.Equal(t, contract.ExtractorAST, astPush.Extractor)
+}
+
+func TestRunSkipsSemanticStageWhenNoKey(t *testing.T) {
+	dir := newGitRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.go"),
+		[]byte("package m\n\nfunc A() {}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/m\n\ngo 1.25\n"), 0o644))
+	commitAll(t, dir, "init")
+
+	var missesCalled, semanticPush bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph/semantic-misses":
+			missesCalled = true
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`["a.go"]`))
+		case "/code-graph:bulk":
+			var p contract.GraphPush
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &p)
+			if p.Extractor == contract.ExtractorSemantic {
+				semanticPush = true
+			}
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		default:
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, getenv: func(string) string { return "" }}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+	require.False(t, missesCalled, "semantic-misses must not be called without a key")
+	require.False(t, semanticPush, "no semantic push without a key")
+}
+
+func TestRunSkipsSemanticStageWhenDisabled(t *testing.T) {
+	dir := newGitRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.go"),
+		[]byte("package m\n\nfunc A() {}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/m\n\ngo 1.25\n"), 0o644))
+	commitAll(t, dir, "init")
+
+	var missesCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph/semantic-misses":
+			missesCalled = true
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`["a.go"]`))
+		case "/code-graph:bulk":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		default:
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	env := map[string]string{"OPENAI_API_KEY": "sk-test", "SEMANTIC_INGEST": "false"}
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, getenv: func(k string) string { return env[k] }}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+	require.False(t, missesCalled, "SEMANTIC_INGEST=false must skip the whole stage")
+}
+
+func TestRunSemanticStagePushesSecondGraphWithSHAs(t *testing.T) {
+	dir := newGitRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.go"),
+		[]byte("package m\n\nfunc A() {}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/m\n\ngo 1.25\n"), 0o644))
+	commitAll(t, dir, "init")
+
+	// Fake OpenAI endpoint returns a valid fragment with one concept + one edge.
+	openai := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/chat/completions", r.URL.Path)
+		w.WriteHeader(200)
+		frag := `{"nodes":[{"id":"misc_idea","label":"Misc Idea","file_type":"concept","source_file":"a.go"}],` +
+			`"edges":[{"source":"go:func:example.com/m.A","target":"concept:m:misc-idea","relation":"conceptually_related_to","confidence":"INFERRED","confidence_score":0.75,"source_file":"a.go"}],` +
+			`"hyperedges":[]}`
+		out := map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": frag}}}}
+		_ = json.NewEncoder(w).Encode(out)
+	}))
+	defer openai.Close()
+
+	var semanticPush contract.GraphPush
+	var sawSemantic atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph/semantic-misses":
+			var req contract.SemanticMissesRequest
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &req)
+			require.Equal(t, "m", req.Repo)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`["a.go"]`))
+		case "/code-graph:bulk":
+			var p contract.GraphPush
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &p)
+			if p.Extractor == contract.ExtractorSemantic {
+				semanticPush = p
+				sawSemantic.Store(true)
+			}
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		default:
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	env := map[string]string{"OPENAI_API_KEY": "sk-test", "OPENAI_BASE_URL": openai.URL}
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, getenv: func(k string) string { return env[k] }}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+
+	require.True(t, sawSemantic.Load(), "expected a semantic GraphPush")
+	require.Equal(t, contract.ExtractorSemantic, semanticPush.Extractor)
+	require.Contains(t, semanticPush.Files, "a.go")
+	require.NotEmpty(t, semanticPush.FileSHAs["a.go"], "semantic push must carry content_sha for the miss")
+	require.NotEmpty(t, semanticPush.Edges, "semantic edge must be present")
+	require.Equal(t, contract.RelConceptuallyRelated, semanticPush.Edges[0].Relation)
+}
+
+func TestRunSemanticStageBestEffortOnLLMError(t *testing.T) {
+	dir := newGitRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.go"),
+		[]byte("package m\n\nfunc A() {}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/m\n\ngo 1.25\n"), 0o644))
+	commitAll(t, dir, "init")
+
+	// OpenAI always 500s (after the one retry it stays failed).
+	openai := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer openai.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph/semantic-misses":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`["a.go"]`))
+		case "/code-graph:bulk":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		default:
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	env := map[string]string{"OPENAI_API_KEY": "sk-test", "OPENAI_BASE_URL": openai.URL}
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, getenv: func(k string) string { return env[k] }}
+	// LLM failure must NOT fail the ingest.
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+}
+
+// newGitRepo creates an initialized git repo in a temp dir.
+func newGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, a := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
+		c := exec.Command("git", a...)
+		c.Dir = dir
+		require.NoError(t, c.Run())
+	}
+	return dir
 }

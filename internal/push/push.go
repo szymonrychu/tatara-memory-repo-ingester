@@ -63,6 +63,20 @@ func (c *Client) PushChunks(ctx context.Context, reconcileFiles []string, items 
 	return nil
 }
 
+// SemanticMisses asks the server which of the supplied files need semantic
+// re-extraction (stored content_sha differs or is absent) and returns their paths.
+func (c *Client) SemanticMisses(ctx context.Context, req contract.SemanticMissesRequest) ([]string, error) {
+	var misses []string
+	if err := c.do(ctx, http.MethodPost, "/code-graph/semantic-misses", req, http.StatusOK, &misses); err != nil {
+		return nil, err
+	}
+	return misses, nil
+}
+
+// HTTP exposes the underlying HTTP client so callers (e.g. the LLM stage) reuse
+// the same authenticated transport.
+func (c *Client) HTTP() *http.Client { return c.http }
+
 func (c *Client) do(ctx context.Context, method, path string, in any, want int, out any) error {
 	var rdr io.Reader
 	if in != nil {
