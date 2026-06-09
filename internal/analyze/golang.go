@@ -466,11 +466,14 @@ func (g goAnalyzer) emitCallEdges(
 		}
 		seenEdge[edgeKey] = true
 
+		score := scoreFor(contract.ResTypeResolved)
 		res.Edges = append(res.Edges, contract.Edge{
-			From:     callerID,
-			To:       calleeID,
-			Relation: contract.RelCalls,
-			SrcFile:  callerRelFile,
+			From:            callerID,
+			To:              calleeID,
+			Relation:        contract.RelCalls,
+			SrcFile:         callerRelFile,
+			ConfidenceScore: score,
+			ConfidenceTier:  contract.TierForScore(score),
 			Properties: map[string]string{
 				"resolution": contract.ResTypeResolved,
 				"confidence": contract.ConfidenceFor(contract.ResTypeResolved),
@@ -532,4 +535,22 @@ func sourceSlice(fset *token.FileSet, start, end token.Pos, filename string) str
 		return string(src)
 	}
 	return string(src[startOff:endOff])
+}
+
+// scoreFor parses the confidence prior string for a resolution level into a float.
+func scoreFor(resolution string) float64 {
+	switch resolution {
+	case contract.ResTypeResolved:
+		return 0.98
+	case contract.ResScopedNameMatch:
+		return 0.85
+	case contract.ResImportedNameMatch:
+		return 0.7
+	case contract.ResGlobalNameMatch:
+		return 0.45
+	case contract.ResAmbiguousMultiDef:
+		return 0.2
+	default:
+		return 0.0
+	}
 }

@@ -10,6 +10,23 @@ import (
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/contract"
 )
 
+func TestGoCallEdgeHasTypedConfidence(t *testing.T) {
+	a := analyze.NewGo("github.com/szymonrychu/")
+	res, err := a.Analyze(context.Background(), "testdata/go", []string{"pkg/pkg.go", "pkg/other.go"})
+	require.NoError(t, err)
+
+	var call *contract.Edge
+	for i := range res.Edges {
+		if res.Edges[i].Relation == contract.RelCalls {
+			call = &res.Edges[i]
+			break
+		}
+	}
+	require.NotNil(t, call, "expected at least one calls edge in the fixture")
+	require.InDelta(t, 0.98, call.ConfidenceScore, 1e-9, "type_resolved -> 0.98 promoted to column")
+	require.Equal(t, contract.TierInferred, call.ConfidenceTier, "0.98 maps to INFERRED")
+}
+
 func TestGoEntityHasTypedLineColumns(t *testing.T) {
 	a := analyze.NewGo("github.com/szymonrychu/")
 	res, err := a.Analyze(context.Background(), "testdata/go", []string{"pkg/pkg.go"})
