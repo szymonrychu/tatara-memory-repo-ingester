@@ -130,3 +130,44 @@ func TestPushChunksNoopWhenNothingToDo(t *testing.T) {
 	require.NoError(t, c.PushChunks(context.Background(), nil, nil))
 	require.False(t, posted, "no reconcile and no items must not POST")
 }
+
+func TestSemanticMissesReturnsMissPaths(t *testing.T) {
+	var gotReq contract.SemanticMissesRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/code-graph/semantic-misses", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotReq))
+		w.WriteHeader(200)
+		_ = json.NewEncoder(w).Encode([]string{"a.go", "c.go"})
+	}))
+	defer srv.Close()
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	misses, err := c.SemanticMisses(context.Background(), contract.SemanticMissesRequest{
+		Repo: "r",
+		Files: []contract.FileSHA{
+			{Path: "a.go", ContentSHA: "s1"},
+			{Path: "b.go", ContentSHA: "s2"},
+			{Path: "c.go", ContentSHA: "s3"},
+		},
+	})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"a.go", "c.go"}, misses)
+	require.Equal(t, "r", gotReq.Repo)
+	require.Len(t, gotReq.Files, 3)
+}
+
+func TestSemanticMissesPropagatesError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer srv.Close()
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	_, err := c.SemanticMisses(context.Background(), contract.SemanticMissesRequest{Repo: "r"})
+	require.Error(t, err)
+}
+
+func TestClientHTTPAccessor(t *testing.T) {
+	hc := &http.Client{}
+	c := push.New("http://x", hc, time.Millisecond)
+	require.Same(t, hc, c.HTTP())
+}

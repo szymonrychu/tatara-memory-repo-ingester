@@ -235,3 +235,54 @@ func TestTierForScore(t *testing.T) {
 		})
 	}
 }
+
+func TestGraphPushExtractorAndFileSHAsShape(t *testing.T) {
+	p := contract.GraphPush{
+		Repo:      "tatara-cli",
+		Commit:    "abc123",
+		Extractor: "semantic",
+		Files:     []string{"cmd/root.go"},
+		Entities:  []contract.Entity{},
+		Edges:     []contract.Edge{},
+		FileSHAs:  map[string]string{"cmd/root.go": "deadbeef"},
+	}
+	b, err := json.Marshal(p)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	require.ElementsMatch(t,
+		[]string{"repo", "commit", "extractor", "files", "entities", "edges", "file_shas"},
+		keys(got))
+	require.Equal(t, "semantic", got["extractor"])
+	shas := got["file_shas"].(map[string]any)
+	require.Equal(t, "deadbeef", shas["cmd/root.go"])
+}
+
+func TestGraphPushExtractorAndFileSHAsOmitEmpty(t *testing.T) {
+	p := contract.GraphPush{Repo: "r", Files: []string{"a.go"}, Entities: []contract.Entity{}, Edges: []contract.Edge{}}
+	b, err := json.Marshal(p)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	_, hasExtractor := got["extractor"]
+	_, hasSHAs := got["file_shas"]
+	require.False(t, hasExtractor, "extractor must be absent when empty")
+	require.False(t, hasSHAs, "file_shas must be absent when empty")
+}
+
+func TestSemanticMissesRequestShape(t *testing.T) {
+	req := contract.SemanticMissesRequest{
+		Repo: "r",
+		Files: []contract.FileSHA{
+			{Path: "a.go", ContentSHA: "sha1"},
+			{Path: "b.go", ContentSHA: "sha2"},
+		},
+	}
+	b, err := json.Marshal(req)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	require.ElementsMatch(t, []string{"repo", "files"}, keys(got))
+	first := got["files"].([]any)[0].(map[string]any)
+	require.ElementsMatch(t, []string{"path", "content_sha"}, keys(first))
+}
