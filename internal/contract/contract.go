@@ -82,6 +82,14 @@ type IngestItem struct {
 	Metadata       map[string]string `json:"metadata,omitempty"`
 }
 
+// BulkMemoriesRequest is the /memories:bulk request body. ReconcileFiles, when
+// set, instructs the server to purge prior memories for each file (by source)
+// before inserting Items. Absent ReconcileFiles preserves insert-only behavior.
+type BulkMemoriesRequest struct {
+	ReconcileFiles []string     `json:"reconcile_files,omitempty"`
+	Items          []IngestItem `json:"items"`
+}
+
 // IngestJob is the /memories:bulk and /ingest-jobs/{id} response.
 type IngestJob struct {
 	ID     string `json:"id"`

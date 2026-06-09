@@ -82,6 +82,30 @@ func keys(m map[string]any) []string {
 	return out
 }
 
+func TestBulkMemoriesRequestShape(t *testing.T) {
+	req := contract.BulkMemoriesRequest{
+		ReconcileFiles: []string{"a.go", "b.md"},
+		Items:          []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}},
+	}
+	b, err := json.Marshal(req)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	require.ElementsMatch(t, []string{"reconcile_files", "items"}, keys(got))
+	require.Len(t, got["reconcile_files"].([]any), 2)
+}
+
+func TestBulkMemoriesRequestReconcileOmitEmpty(t *testing.T) {
+	req := contract.BulkMemoriesRequest{Items: []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}}}
+	b, err := json.Marshal(req)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	_, has := got["reconcile_files"]
+	require.False(t, has, "reconcile_files must be absent when empty")
+	require.ElementsMatch(t, []string{"items"}, keys(got))
+}
+
 func TestHyperedgeJSONShape(t *testing.T) {
 	h := contract.Hyperedge{
 		ID: "he:1", Label: "trait impl", Relation: "implement",
