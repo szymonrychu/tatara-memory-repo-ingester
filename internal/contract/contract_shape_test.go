@@ -82,6 +82,54 @@ func keys(m map[string]any) []string {
 	return out
 }
 
+func TestHyperedgeJSONShape(t *testing.T) {
+	h := contract.Hyperedge{
+		ID: "he:1", Label: "trait impl", Relation: "implement",
+		ConfidenceScore: 0.9, SrcFile: "x.go",
+		Members:    []string{"go:type:m.A", "go:type:m.B", "go:type:m.C"},
+		Properties: map[string]string{"k": "v"},
+	}
+	b, err := json.Marshal(h)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	require.ElementsMatch(t,
+		[]string{"id", "label", "relation", "confidence_score", "src_file", "members", "properties"},
+		keys(got))
+	require.Len(t, got["members"].([]any), 3)
+}
+
+func TestGraphPushHyperedgesOmitEmpty(t *testing.T) {
+	p := contract.GraphPush{Repo: "r", Files: []string{"a.go"}, Entities: []contract.Entity{}, Edges: []contract.Edge{}}
+	b, err := json.Marshal(p)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	_, has := got["hyperedges"]
+	require.False(t, has, "hyperedges key must be absent when empty")
+}
+
+func TestGraphPushHyperedgesPresentWhenSet(t *testing.T) {
+	p := contract.GraphPush{
+		Repo: "r", Files: []string{"a.go"}, Entities: []contract.Entity{}, Edges: []contract.Edge{},
+		Hyperedges: []contract.Hyperedge{{ID: "he:1", Label: "l", Relation: "form", SrcFile: "a.go",
+			Members: []string{"x", "y", "z"}}},
+	}
+	b, err := json.Marshal(p)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	require.Len(t, got["hyperedges"].([]any), 1)
+}
+
+func TestSemanticRelationConstants(t *testing.T) {
+	require.Equal(t, "conceptually_related_to", contract.RelConceptuallyRelated)
+	require.Equal(t, "semantically_similar_to", contract.RelSemanticallySimilar)
+	require.Equal(t, "rationale_for", contract.RelRationaleFor)
+	require.Equal(t, "shares_data_with", contract.RelSharesDataWith)
+	require.Equal(t, "cites", contract.RelCites)
+}
+
 func TestEntityProvenanceFields(t *testing.T) {
 	e := contract.Entity{
 		ID: "doc:file:README.md", Name: "README.md", Type: contract.EntityDocFile,

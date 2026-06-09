@@ -45,14 +45,26 @@ type SymbolRow struct {
 	SrcFile  string `json:"src_file"`
 }
 
+// Hyperedge is an n-ary relationship over 3+ entities (Phase 2 producer; reserved now).
+type Hyperedge struct {
+	ID              string            `json:"id"`
+	Label           string            `json:"label"`
+	Relation        string            `json:"relation"` // participate_in|implement|form
+	ConfidenceScore float64           `json:"confidence_score,omitempty"`
+	SrcFile         string            `json:"src_file"`
+	Members         []string          `json:"members"` // entity IDs (3+)
+	Properties      map[string]string `json:"properties,omitempty"`
+}
+
 // GraphPush is one /code-graph:bulk request.
 type GraphPush struct {
-	Repo     string      `json:"repo"`
-	Commit   string      `json:"commit,omitempty"`
-	Files    []string    `json:"files"`
-	Entities []Entity    `json:"entities"`
-	Edges    []Edge      `json:"edges"`
-	Symbols  []SymbolRow `json:"symbols,omitempty"`
+	Repo       string      `json:"repo"`
+	Commit     string      `json:"commit,omitempty"`
+	Files      []string    `json:"files"`
+	Entities   []Entity    `json:"entities"`
+	Edges      []Edge      `json:"edges"`
+	Symbols    []SymbolRow `json:"symbols,omitempty"`
+	Hyperedges []Hyperedge `json:"hyperedges,omitempty"` // empty until Phase 2
 }
 
 // PushResult is the /code-graph:bulk response.
@@ -152,6 +164,13 @@ const (
 	RelValueRef     = "value_ref"
 	RelIncludes     = "includes"
 	RelSubchart     = "subchart"
+
+	// Semantic relations (reserved Phase 0, emitted Phase 2).
+	RelConceptuallyRelated = "conceptually_related_to"
+	RelSemanticallySimilar = "semantically_similar_to"
+	RelRationaleFor        = "rationale_for"
+	RelSharesDataWith      = "shares_data_with"
+	RelCites               = "cites"
 )
 
 // M3 call-edge resolution levels (property key "resolution").
