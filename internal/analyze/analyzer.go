@@ -11,10 +11,11 @@ import (
 
 // Result is what an Analyzer emits for its assigned file set.
 type Result struct {
-	Entities []contract.Entity
-	Edges    []contract.Edge
-	Chunks   []contract.Chunk
-	Symbols  []contract.SymbolRow
+	Entities   []contract.Entity
+	Edges      []contract.Edge
+	Chunks     []contract.Chunk
+	Symbols    []contract.SymbolRow
+	Hyperedges []contract.Hyperedge
 }
 
 // Analyzer extracts a code graph and chunks for one language/file class.

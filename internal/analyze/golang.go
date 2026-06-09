@@ -68,6 +68,10 @@ func (g goAnalyzer) Analyze(ctx context.Context, repoRoot string, files []string
 	if err != nil {
 		return Result{}, fmt.Errorf("filepath.Abs(%q): %w", repoRoot, err)
 	}
+	// Resolve symlinks so that filepath.Rel works correctly on macOS where /tmp -> /private/tmp.
+	if resolved, err2 := filepath.EvalSymlinks(absRepoRoot); err2 == nil {
+		absRepoRoot = resolved
+	}
 
 	// Build scope set from caller-supplied file list (repo-relative paths).
 	scope := make(map[string]bool, len(files))
@@ -193,9 +197,11 @@ func (g goAnalyzer) processPackage(
 			// Determine signature string.
 			sig := funcSignature(pkg.Fset, pkg.TypesInfo, fd)
 
+			lineStart := pkg.Fset.Position(fd.Pos()).Line
+			lineEnd := pkg.Fset.Position(fd.End()).Line
 			props := map[string]string{
-				"line_start": fmt.Sprintf("%d", pkg.Fset.Position(fd.Pos()).Line),
-				"line_end":   fmt.Sprintf("%d", pkg.Fset.Position(fd.End()).Line),
+				"line_start": fmt.Sprintf("%d", lineStart),
+				"line_end":   fmt.Sprintf("%d", lineEnd),
 				"signature":  sig,
 				"exported":   fmt.Sprintf("%v", ast.IsExported(fd.Name.Name)),
 			}
@@ -205,6 +211,8 @@ func (g goAnalyzer) processPackage(
 				Name:       name,
 				Type:       entityType,
 				FilePath:   rel,
+				LineStart:  lineStart,
+				LineEnd:    lineEnd,
 				Properties: props,
 			})
 
@@ -458,11 +466,14 @@ func (g goAnalyzer) emitCallEdges(
 		}
 		seenEdge[edgeKey] = true
 
+		score := scoreFor(contract.ResTypeResolved)
 		res.Edges = append(res.Edges, contract.Edge{
-			From:     callerID,
-			To:       calleeID,
-			Relation: contract.RelCalls,
-			SrcFile:  callerRelFile,
+			From:            callerID,
+			To:              calleeID,
+			Relation:        contract.RelCalls,
+			SrcFile:         callerRelFile,
+			ConfidenceScore: score,
+			ConfidenceTier:  contract.TierForScore(score),
 			Properties: map[string]string{
 				"resolution": contract.ResTypeResolved,
 				"confidence": contract.ConfidenceFor(contract.ResTypeResolved),
@@ -524,4 +535,22 @@ func sourceSlice(fset *token.FileSet, start, end token.Pos, filename string) str
 		return string(src)
 	}
 	return string(src[startOff:endOff])
+}
+
+// scoreFor parses the confidence prior string for a resolution level into a float.
+func scoreFor(resolution string) float64 {
+	switch resolution {
+	case contract.ResTypeResolved:
+		return 0.98
+	case contract.ResScopedNameMatch:
+		return 0.85
+	case contract.ResImportedNameMatch:
+		return 0.7
+	case contract.ResGlobalNameMatch:
+		return 0.45
+	case contract.ResAmbiguousMultiDef:
+		return 0.2
+	default:
+		return 0.0
+	}
 }

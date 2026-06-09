@@ -10,6 +10,40 @@ import (
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/contract"
 )
 
+func TestGoCallEdgeHasTypedConfidence(t *testing.T) {
+	a := analyze.NewGo("github.com/szymonrychu/")
+	res, err := a.Analyze(context.Background(), "testdata/go", []string{"pkg/pkg.go", "pkg/other.go"})
+	require.NoError(t, err)
+
+	var call *contract.Edge
+	for i := range res.Edges {
+		if res.Edges[i].Relation == contract.RelCalls {
+			call = &res.Edges[i]
+			break
+		}
+	}
+	require.NotNil(t, call, "expected at least one calls edge in the fixture")
+	require.InDelta(t, 0.98, call.ConfidenceScore, 1e-9, "type_resolved -> 0.98 promoted to column")
+	require.Equal(t, contract.TierInferred, call.ConfidenceTier, "0.98 maps to INFERRED")
+}
+
+func TestGoEntityHasTypedLineColumns(t *testing.T) {
+	a := analyze.NewGo("github.com/szymonrychu/")
+	res, err := a.Analyze(context.Background(), "testdata/go", []string{"pkg/pkg.go"})
+	require.NoError(t, err)
+
+	var fn *contract.Entity
+	for i := range res.Entities {
+		if res.Entities[i].Type == contract.EntityGoFunc || res.Entities[i].Type == contract.EntityGoMethod {
+			fn = &res.Entities[i]
+			break
+		}
+	}
+	require.NotNil(t, fn, "expected at least one func/method entity")
+	require.Greater(t, fn.LineStart, 0, "line_start promoted to typed column")
+	require.GreaterOrEqual(t, fn.LineEnd, fn.LineStart, "line_end promoted to typed column")
+}
+
 func findSymbol(syms []contract.SymbolRow, role, symbol string) (contract.SymbolRow, bool) {
 	for _, s := range syms {
 		if s.Role == role && s.Symbol == symbol {

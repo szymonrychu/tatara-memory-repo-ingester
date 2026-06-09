@@ -34,15 +34,16 @@ func (c *Client) PushGraph(ctx context.Context, p contract.GraphPush) (contract.
 	return res, nil
 }
 
-// PushChunks posts chunks and polls the resulting job to a terminal state.
-func (c *Client) PushChunks(ctx context.Context, items []contract.IngestItem) error {
-	if len(items) == 0 {
+// PushChunks posts a reconcile-aware bulk and polls the resulting job to a
+// terminal state. reconcileFiles, when non-empty, instructs the server to purge
+// prior memories for each file before inserting items. When both reconcileFiles
+// and items are empty there is nothing to do.
+func (c *Client) PushChunks(ctx context.Context, reconcileFiles []string, items []contract.IngestItem) error {
+	if len(items) == 0 && len(reconcileFiles) == 0 {
 		return nil
 	}
 	var job contract.IngestJob
-	body := struct {
-		Items []contract.IngestItem `json:"items"`
-	}{Items: items}
+	body := contract.BulkMemoriesRequest{ReconcileFiles: reconcileFiles, Items: items}
 	if err := c.do(ctx, http.MethodPost, "/memories:bulk", body, http.StatusAccepted, &job); err != nil {
 		return err
 	}

@@ -10,16 +10,23 @@ type Entity struct {
 	Type        string            `json:"type"`
 	Description string            `json:"description,omitempty"`
 	FilePath    string            `json:"file_path"`
+	LineStart   int               `json:"line_start,omitempty"`  // Go already computes these
+	LineEnd     int               `json:"line_end,omitempty"`    //
+	SourceURL   string            `json:"source_url,omitempty"`  // doc frontmatter
+	Author      string            `json:"author,omitempty"`      // doc frontmatter
+	CapturedAt  string            `json:"captured_at,omitempty"` // doc frontmatter, RFC3339
 	Properties  map[string]string `json:"properties,omitempty"`
 }
 
 // Edge is a directed, typed relationship between two entities.
 type Edge struct {
-	From       string            `json:"from"`
-	To         string            `json:"to"`
-	Relation   string            `json:"relation"`
-	SrcFile    string            `json:"src_file"`
-	Properties map[string]string `json:"properties,omitempty"`
+	From            string            `json:"from"`
+	To              string            `json:"to"`
+	Relation        string            `json:"relation"`
+	SrcFile         string            `json:"src_file"`
+	ConfidenceScore float64           `json:"confidence_score,omitempty"` // 1.0 EXTRACTED, <1 INFERRED
+	ConfidenceTier  string            `json:"confidence_tier,omitempty"`  // EXTRACTED|INFERRED|AMBIGUOUS
+	Properties      map[string]string `json:"properties,omitempty"`
 }
 
 // Symbol roles.
@@ -38,14 +45,26 @@ type SymbolRow struct {
 	SrcFile  string `json:"src_file"`
 }
 
+// Hyperedge is an n-ary relationship over 3+ entities (Phase 2 producer; reserved now).
+type Hyperedge struct {
+	ID              string            `json:"id"`
+	Label           string            `json:"label"`
+	Relation        string            `json:"relation"` // participate_in|implement|form
+	ConfidenceScore float64           `json:"confidence_score,omitempty"`
+	SrcFile         string            `json:"src_file"`
+	Members         []string          `json:"members"` // entity IDs (3+)
+	Properties      map[string]string `json:"properties,omitempty"`
+}
+
 // GraphPush is one /code-graph:bulk request.
 type GraphPush struct {
-	Repo     string      `json:"repo"`
-	Commit   string      `json:"commit,omitempty"`
-	Files    []string    `json:"files"`
-	Entities []Entity    `json:"entities"`
-	Edges    []Edge      `json:"edges"`
-	Symbols  []SymbolRow `json:"symbols,omitempty"`
+	Repo       string      `json:"repo"`
+	Commit     string      `json:"commit,omitempty"`
+	Files      []string    `json:"files"`
+	Entities   []Entity    `json:"entities"`
+	Edges      []Edge      `json:"edges"`
+	Symbols    []SymbolRow `json:"symbols,omitempty"`
+	Hyperedges []Hyperedge `json:"hyperedges,omitempty"` // empty until Phase 2
 }
 
 // PushResult is the /code-graph:bulk response.
@@ -61,6 +80,14 @@ type IngestItem struct {
 	IdempotencyKey string            `json:"idempotency_key"`
 	Text           string            `json:"text"`
 	Metadata       map[string]string `json:"metadata,omitempty"`
+}
+
+// BulkMemoriesRequest is the /memories:bulk request body. ReconcileFiles, when
+// set, instructs the server to purge prior memories for each file (by source)
+// before inserting Items. Absent ReconcileFiles preserves insert-only behavior.
+type BulkMemoriesRequest struct {
+	ReconcileFiles []string     `json:"reconcile_files,omitempty"`
+	Items          []IngestItem `json:"items"`
 }
 
 // IngestJob is the /memories:bulk and /ingest-jobs/{id} response.
@@ -124,6 +151,10 @@ const (
 	EntityHelmChart    = "helm_chart"
 	EntityHelmTemplate = "helm_template"
 	EntityHelmValue    = "helm_value"
+	EntityDocFile      = "doc_file"
+	EntityDocSection   = "doc_section"
+	EntityConcept      = "concept"
+	EntityRationale    = "rationale"
 )
 
 // Edge relations.
@@ -141,6 +172,13 @@ const (
 	RelValueRef     = "value_ref"
 	RelIncludes     = "includes"
 	RelSubchart     = "subchart"
+
+	// Semantic relations (reserved Phase 0, emitted Phase 2).
+	RelConceptuallyRelated = "conceptually_related_to"
+	RelSemanticallySimilar = "semantically_similar_to"
+	RelRationaleFor        = "rationale_for"
+	RelSharesDataWith      = "shares_data_with"
+	RelCites               = "cites"
 )
 
 // M3 call-edge resolution levels (property key "resolution").
@@ -168,5 +206,25 @@ func ConfidenceFor(resolution string) string {
 		return "0.2"
 	default:
 		return "0.0"
+	}
+}
+
+// Confidence tier values (typed column on code_edges; promoted from the scalar score).
+const (
+	TierExtracted = "EXTRACTED"
+	TierInferred  = "INFERRED"
+	TierAmbiguous = "AMBIGUOUS"
+)
+
+// TierForScore maps a confidence score to a tier:
+// 1.0 -> EXTRACTED; (0.3,1.0) -> INFERRED; <=0.3 -> AMBIGUOUS.
+func TierForScore(score float64) string {
+	switch {
+	case score >= 1.0:
+		return TierExtracted
+	case score > 0.3:
+		return TierInferred
+	default:
+		return TierAmbiguous
 	}
 }

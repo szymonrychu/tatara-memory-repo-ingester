@@ -21,6 +21,16 @@ func (f fakeAnalyzer) Analyze(_ context.Context, _ string, files []string) (anal
 	return analyze.Result{Entities: []contract.Entity{{ID: f.name, Name: f.name}}}, nil
 }
 
+func TestResultCarriesHyperedges(t *testing.T) {
+	var r analyze.Result
+	r.Hyperedges = append(r.Hyperedges, contract.Hyperedge{
+		ID: "he:1", Label: "l", Relation: "form", SrcFile: "a.go",
+		Members: []string{"x", "y", "z"},
+	})
+	require.Len(t, r.Hyperedges, 1)
+	require.Equal(t, "he:1", r.Hyperedges[0].ID)
+}
+
 func TestRegistryGroupsByFirstMatch(t *testing.T) {
 	reg := analyze.NewRegistry()
 	reg.Register(fakeAnalyzer{name: "go", match: func(p string) bool { return p == "a.go" }})

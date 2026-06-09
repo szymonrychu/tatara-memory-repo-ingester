@@ -38,12 +38,30 @@ func run(ctx context.Context, o options, hc *http.Client) error {
 		return runSCIP(ctx, o, hc)
 	}
 	start := time.Now()
-	files, err := walk.Changed(o.repoRoot, o.since, o.full)
+	changes, err := walk.Diff(o.repoRoot, o.since, o.full)
 	if err != nil {
 		return err
 	}
+
+	// touched is every file in the diff (code-graph Files + memories reconcile_files).
+	// analyzeFiles is only A/M/renamed-new (the files we re-analyze and chunk).
+	var touched, analyzeFiles []string
+	for _, ch := range changes.Files {
+		touched = append(touched, ch.Path)
+		if ch.Status == 'R' && ch.OldPath != "" {
+			// For renames the old path is never analyzed, but must appear in the
+			// purge sets (touched/Files + reconcile_files) so the server removes
+			// stale entities and chunks for the old location.
+			touched = append(touched, ch.OldPath)
+		}
+		switch ch.Status {
+		case 'A', 'M', 'R':
+			analyzeFiles = append(analyzeFiles, ch.Path)
+		}
+	}
+
 	reg := analyze.Default(o.crossRepoPrefix)
-	groups := reg.Group(files)
+	groups := reg.Group(analyzeFiles)
 
 	var agg analyze.Result
 	for _, a := range reg.Analyzers() {
@@ -60,23 +78,31 @@ func run(ctx context.Context, o options, hc *http.Client) error {
 		agg.Edges = append(agg.Edges, res.Edges...)
 		agg.Chunks = append(agg.Chunks, res.Chunks...)
 		agg.Symbols = append(agg.Symbols, res.Symbols...)
+		agg.Hyperedges = append(agg.Hyperedges, res.Hyperedges...)
 	}
 
 	commit := headCommit(o.repoRoot)
 	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval))
 	if _, err := cl.PushGraph(ctx, contract.GraphPush{
-		Repo: o.repoName, Commit: commit, Files: files,
+		Repo: o.repoName, Commit: commit, Files: touched,
 		Entities: agg.Entities, Edges: agg.Edges, Symbols: agg.Symbols,
+		Hyperedges: agg.Hyperedges,
 	}); err != nil {
 		return err
 	}
-	if err := cl.PushChunks(ctx, push.ItemsFromChunks(o.repoName, agg.Chunks)); err != nil {
+	reconcile := touched
+	if changes.FullSet {
+		reconcile = nil // first/full ingest is insert-only (no reconcile)
+	}
+	if err := cl.PushChunks(ctx, reconcile, push.ItemsFromChunks(o.repoName, agg.Chunks)); err != nil {
 		return err
 	}
 	slog.Info("ingest complete",
-		"repo", o.repoName, "files", len(files),
+		"repo", o.repoName, "files", len(touched),
+		"analyzed", len(analyzeFiles),
 		"entities", len(agg.Entities), "edges", len(agg.Edges),
 		"chunks", len(agg.Chunks), "symbols", len(agg.Symbols),
+		"full", changes.FullSet,
 		"duration_ms", time.Since(start).Milliseconds())
 	return nil
 }
