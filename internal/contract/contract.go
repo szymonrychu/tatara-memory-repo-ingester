@@ -10,6 +10,11 @@ type Entity struct {
 	Type        string            `json:"type"`
 	Description string            `json:"description,omitempty"`
 	FilePath    string            `json:"file_path"`
+	LineStart   int               `json:"line_start,omitempty"`  // Go already computes these
+	LineEnd     int               `json:"line_end,omitempty"`    //
+	SourceURL   string            `json:"source_url,omitempty"`  // doc frontmatter
+	Author      string            `json:"author,omitempty"`      // doc frontmatter
+	CapturedAt  string            `json:"captured_at,omitempty"` // doc frontmatter, RFC3339
 	Properties  map[string]string `json:"properties,omitempty"`
 }
 
@@ -126,6 +131,10 @@ const (
 	EntityHelmChart    = "helm_chart"
 	EntityHelmTemplate = "helm_template"
 	EntityHelmValue    = "helm_value"
+	EntityDocFile      = "doc_file"
+	EntityDocSection   = "doc_section"
+	EntityConcept      = "concept"
+	EntityRationale    = "rationale"
 )
 
 // Edge relations.

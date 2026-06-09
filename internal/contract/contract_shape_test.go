@@ -82,6 +82,40 @@ func keys(m map[string]any) []string {
 	return out
 }
 
+func TestEntityProvenanceFields(t *testing.T) {
+	e := contract.Entity{
+		ID: "doc:file:README.md", Name: "README.md", Type: contract.EntityDocFile,
+		FilePath: "README.md", LineStart: 1, LineEnd: 42,
+		SourceURL: "https://example.com/x", Author: "alice", CapturedAt: "2026-06-09T00:00:00Z",
+	}
+	b, err := json.Marshal(e)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	require.ElementsMatch(t,
+		[]string{"id", "name", "type", "file_path", "line_start", "line_end", "source_url", "author", "captured_at"},
+		keys(got))
+}
+
+func TestEntityProvenanceOmitEmpty(t *testing.T) {
+	e := contract.Entity{ID: "go:package:m", Name: "m", Type: contract.EntityGoPackage, FilePath: ""}
+	b, err := json.Marshal(e)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	for _, k := range []string{"line_start", "line_end", "source_url", "author", "captured_at"} {
+		_, has := got[k]
+		require.False(t, has, "%s must be absent when empty", k)
+	}
+}
+
+func TestDocEntityTypeConstants(t *testing.T) {
+	require.Equal(t, "doc_file", contract.EntityDocFile)
+	require.Equal(t, "doc_section", contract.EntityDocSection)
+	require.Equal(t, "concept", contract.EntityConcept)
+	require.Equal(t, "rationale", contract.EntityRationale)
+}
+
 func TestEdgeConfidenceFields(t *testing.T) {
 	e := contract.Edge{
 		From: "a", To: "b", Relation: contract.RelCalls, SrcFile: "x.go",
