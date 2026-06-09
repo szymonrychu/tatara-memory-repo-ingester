@@ -283,12 +283,12 @@ func extractChunk(ctx context.Context, repo string, client *llm.Client, ck seman
 	})
 	out, err := client.Complete(ctx, prompt)
 	if err != nil {
-		slog.Warn("semantic LLM call failed; skipping chunk", "repo", repo, "chunk", chunkNum, "error", err)
+		slog.Warn("semantic LLM call failed; skipping chunk", "repo", repo, "chunk", chunkNum, "error", err) //nolint:gosec // G706: repo and err are internal values, not HTTP input
 		return analyze.Result{}, false
 	}
 	res, err := semantic.ParseFragment(repo, []byte(out))
 	if err != nil {
-		slog.Warn("semantic parse failed; skipping chunk", "repo", repo, "chunk", chunkNum, "error", err)
+		slog.Warn("semantic parse failed; skipping chunk", "repo", repo, "chunk", chunkNum, "error", err) //nolint:gosec // G706: repo and err are internal values, not HTTP input
 		return analyze.Result{}, false
 	}
 	return res, true

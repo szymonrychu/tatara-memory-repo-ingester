@@ -39,7 +39,18 @@ func TestBuildPromptSubstitutesPlaceholders(t *testing.T) {
 func TestBuildPromptKeepsSchemaIntact(t *testing.T) {
 	got := BuildPrompt(PromptVars{FileList: "- a.go", ChunkNum: 1, TotalChunks: 1, ChunkPath: "/tmp/c.json"})
 	require.Contains(t, got, "Generate the extraction JSON matching this schema exactly:")
-	require.Contains(t, got, "\"semantically_similar_to\"")
+	// The schema JSON enumerates semantically_similar_to in the relation pipe-list; the prose
+	// line uses backtick quoting (verified by TestExtractionSpecProseUsesBackticks).
+	require.Contains(t, got, "semantically_similar_to")
+}
+
+// TestExtractionSpecProseUsesBackticks guards the blind spot: the prose description of
+// the semantically_similar_to edge must use backticks (verbatim from the graphify source),
+// not double quotes. The schema JSON line legitimately uses double quotes, but the
+// "add a `semantically_similar_to` edge" sentence must match the source exactly.
+func TestExtractionSpecProseUsesBackticks(t *testing.T) {
+	require.Contains(t, extractionSpec, "add a `semantically_similar_to` edge",
+		"prose line must use backtick-quoted identifier to match graphify extraction-spec source verbatim")
 }
 
 var _ = strings.Contains // ensure import used
