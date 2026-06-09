@@ -81,6 +81,12 @@ func run(ctx context.Context, o options, hc *http.Client) error {
 		agg.Hyperedges = append(agg.Hyperedges, res.Hyperedges...)
 	}
 
+	if len(touched) == 0 {
+		commit := headCommit(o.repoRoot)
+		slog.Info("ingest no-op: no changed files", "repo", o.repoName, "commit", commit)
+		return nil
+	}
+
 	commit := headCommit(o.repoRoot)
 	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval))
 	if _, err := cl.PushGraph(ctx, contract.GraphPush{
