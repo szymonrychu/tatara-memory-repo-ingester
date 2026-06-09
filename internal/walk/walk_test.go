@@ -59,6 +59,50 @@ func byPath(c walk.Changes) map[string]walk.Change {
 	return m
 }
 
+func TestSinceDiffClassifiesAddModifyDelete(t *testing.T) {
+	dir := gitRepo(t)
+	write(t, dir, "keep.go", "package a")
+	write(t, dir, "gone.go", "package g")
+	base := commit(t, dir, "init")
+
+	write(t, dir, "keep.go", "package a // changed")
+	write(t, dir, "new.go", "package n")
+	require.NoError(t, os.Remove(filepath.Join(dir, "gone.go")))
+	commit(t, dir, "mutate")
+
+	got, err := walk.Diff(dir, base, false)
+	require.NoError(t, err)
+	require.False(t, got.FullSet)
+	m := byPath(got)
+	require.Equal(t, 'M', m["keep.go"].Status)
+	require.Equal(t, sha("package a // changed"), m["keep.go"].ContentSHA)
+	require.Equal(t, 'A', m["new.go"].Status)
+	require.Equal(t, sha("package n"), m["new.go"].ContentSHA)
+	require.Equal(t, 'D', m["gone.go"].Status)
+	require.Empty(t, m["gone.go"].ContentSHA, "deleted file has no content sha")
+}
+
+func TestSinceDiffPairsRename(t *testing.T) {
+	dir := gitRepo(t)
+	write(t, dir, "old/name.go", "package x\n\nfunc Stable() {}\n")
+	base := commit(t, dir, "init")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "new"), 0o755))
+	require.NoError(t, os.Rename(
+		filepath.Join(dir, "old/name.go"), filepath.Join(dir, "new/name.go")))
+	commit(t, dir, "rename")
+
+	got, err := walk.Diff(dir, base, false)
+	require.NoError(t, err)
+	require.False(t, got.FullSet)
+	require.Len(t, got.Files, 1)
+	ch := got.Files[0]
+	require.Equal(t, 'R', ch.Status)
+	require.Equal(t, "new/name.go", ch.Path)
+	require.Equal(t, "old/name.go", ch.OldPath)
+	require.Equal(t, sha("package x\n\nfunc Stable() {}\n"), ch.ContentSHA)
+}
+
 func TestFullWalkListsTrackedFiles(t *testing.T) {
 	dir := gitRepo(t)
 	write(t, dir, "a.go", "package a")
