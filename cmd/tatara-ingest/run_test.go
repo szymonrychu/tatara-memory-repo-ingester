@@ -19,6 +19,75 @@ import (
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/contract"
 )
 
+func TestRunReconcileFilesMatchTouchedSet(t *testing.T) {
+	dir := t.TempDir()
+	for _, a := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
+		c := exec.Command("git", a...)
+		c.Dir = dir
+		require.NoError(t, c.Run())
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "doc.md"), []byte("# Doc\n\nbody\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "old.md"), []byte("# Old\n\ngone\n"), 0o644))
+	base := commitAll(t, dir, "init")
+
+	require.NoError(t, os.Remove(filepath.Join(dir, "old.md")))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "doc.md"), []byte("# Doc\n\nbody2\n"), 0o644))
+	commitAll(t, dir, "delete old, modify doc")
+
+	var bulkReq contract.BulkMemoriesRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph:bulk":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		case "/memories:bulk":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &bulkReq)
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		default:
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, since: base}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+	require.ElementsMatch(t, []string{"doc.md", "old.md"}, bulkReq.ReconcileFiles)
+}
+
+func TestRunFullIngestHasNoReconcileFiles(t *testing.T) {
+	dir := t.TempDir()
+	for _, a := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
+		c := exec.Command("git", a...)
+		c.Dir = dir
+		require.NoError(t, c.Run())
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "doc.md"), []byte("# Doc\n\nbody\n"), 0o644))
+	commitAll(t, dir, "init")
+
+	var bulkReq contract.BulkMemoriesRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph:bulk":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		case "/memories:bulk":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &bulkReq)
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		default:
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL} // full (no since)
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+	require.Empty(t, bulkReq.ReconcileFiles, "full/first ingest is insert-only")
+}
+
 func TestRunSendsDeletedFilesInGraphAndReconcile(t *testing.T) {
 	dir := t.TempDir()
 	for _, a := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
