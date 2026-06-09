@@ -1,6 +1,8 @@
 package walk_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,25 +45,34 @@ func commit(t *testing.T, dir, msg string) string {
 	return string(out[:len(out)-1])
 }
 
+func sha(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}
+
+// byPath indexes a Changes result by new path for assertions.
+func byPath(c walk.Changes) map[string]walk.Change {
+	m := map[string]walk.Change{}
+	for _, ch := range c.Files {
+		m[ch.Path] = ch
+	}
+	return m
+}
+
 func TestFullWalkListsTrackedFiles(t *testing.T) {
 	dir := gitRepo(t)
 	write(t, dir, "a.go", "package a")
 	write(t, dir, "sub/b.py", "x = 1")
 	commit(t, dir, "init")
-	files, err := walk.Changed(dir, "", false)
-	require.NoError(t, err)
-	require.ElementsMatch(t, []string{"a.go", "sub/b.py"}, files)
-}
 
-func TestSinceWalkListsOnlyChanged(t *testing.T) {
-	dir := gitRepo(t)
-	write(t, dir, "a.go", "package a")
-	base := commit(t, dir, "init")
-	write(t, dir, "c.go", "package c")
-	commit(t, dir, "add c")
-	files, err := walk.Changed(dir, base, false)
+	got, err := walk.Diff(dir, "", false)
 	require.NoError(t, err)
-	require.Equal(t, []string{"c.go"}, files)
+	require.True(t, got.FullSet)
+	m := byPath(got)
+	require.Len(t, m, 2)
+	require.Equal(t, 'A', m["a.go"].Status)
+	require.Equal(t, 'A', m["sub/b.py"].Status)
+	require.Equal(t, sha("package a"), m["a.go"].ContentSHA)
 }
 
 func TestFullFlagOverridesSince(t *testing.T) {
@@ -70,7 +81,12 @@ func TestFullFlagOverridesSince(t *testing.T) {
 	base := commit(t, dir, "init")
 	write(t, dir, "c.go", "package c")
 	commit(t, dir, "add c")
-	files, err := walk.Changed(dir, base, true)
+
+	got, err := walk.Diff(dir, base, true)
 	require.NoError(t, err)
-	require.ElementsMatch(t, []string{"a.go", "c.go"}, files)
+	require.True(t, got.FullSet)
+	m := byPath(got)
+	require.Len(t, m, 2)
+	require.Contains(t, m, "a.go")
+	require.Contains(t, m, "c.go")
 }
