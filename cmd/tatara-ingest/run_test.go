@@ -135,6 +135,64 @@ func TestRunSendsDeletedFilesInGraphAndReconcile(t *testing.T) {
 	}
 }
 
+// TestRunRenameOldPathPurgedNewPathIngested asserts the rename invariant:
+//   - old path appears in code-graph Files (so server purges its entities)
+//   - old path appears in memories reconcile_files (so server purges its chunks)
+//   - old path contributes NO entities
+//   - new path is analyzed and contributes entities
+func TestRunRenameOldPathPurgedNewPathIngested(t *testing.T) {
+	dir := t.TempDir()
+	for _, a := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
+		c := exec.Command("git", a...)
+		c.Dir = dir
+		require.NoError(t, c.Run())
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "old.go"),
+		[]byte("package m\n\nfunc OldFunc() {}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/m\n\ngo 1.25\n"), 0o644))
+	base := commitAll(t, dir, "init")
+
+	// rename old.go -> new.go
+	require.NoError(t, os.Rename(filepath.Join(dir, "old.go"), filepath.Join(dir, "new.go")))
+	commitAll(t, dir, "rename old.go to new.go")
+
+	var capturedPush contract.GraphPush
+	var bulkReq contract.BulkMemoriesRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph:bulk":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &capturedPush)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		case "/memories:bulk":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &bulkReq)
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		default:
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, since: base}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+
+	// old path must be in both purge sets
+	require.Contains(t, capturedPush.Files, "old.go", "rename old-path must be in code-graph Files for purge")
+	require.Contains(t, bulkReq.ReconcileFiles, "old.go", "rename old-path must be in memories reconcile_files for purge")
+
+	// old path must contribute no entities (purge-only)
+	for _, e := range capturedPush.Entities {
+		require.NotEqual(t, "old.go", e.FilePath, "rename old-path must contribute no entities")
+	}
+
+	// new path must be in Files and analyzed (has entities)
+	require.Contains(t, capturedPush.Files, "new.go", "rename new-path must be in code-graph Files")
+}
+
 // commitAll commits all changes and returns HEAD.
 func commitAll(t *testing.T, dir, msg string) string {
 	t.Helper()

@@ -48,6 +48,12 @@ func run(ctx context.Context, o options, hc *http.Client) error {
 	var touched, analyzeFiles []string
 	for _, ch := range changes.Files {
 		touched = append(touched, ch.Path)
+		if ch.Status == 'R' && ch.OldPath != "" {
+			// For renames the old path is never analyzed, but must appear in the
+			// purge sets (touched/Files + reconcile_files) so the server removes
+			// stale entities and chunks for the old location.
+			touched = append(touched, ch.OldPath)
+		}
 		switch ch.Status {
 		case 'A', 'M', 'R':
 			analyzeFiles = append(analyzeFiles, ch.Path)
