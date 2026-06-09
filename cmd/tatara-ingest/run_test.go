@@ -495,11 +495,13 @@ func TestRunSemanticStagePushesSecondGraphWithSHAs(t *testing.T) {
 	commitAll(t, dir, "init")
 
 	// Fake OpenAI endpoint returns a valid fragment with one concept + one edge.
+	// Edge target uses the model-emitted id ("misc_idea"), not the canonical form,
+	// so ParseFragment's concept-id remap is exercised end-to-end.
 	openai := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/chat/completions", r.URL.Path)
 		w.WriteHeader(200)
 		frag := `{"nodes":[{"id":"misc_idea","label":"Misc Idea","file_type":"concept","source_file":"a.go"}],` +
-			`"edges":[{"source":"go:func:example.com/m.A","target":"concept:m:misc-idea","relation":"conceptually_related_to","confidence":"INFERRED","confidence_score":0.75,"source_file":"a.go"}],` +
+			`"edges":[{"source":"go:func:example.com/m.A","target":"misc_idea","relation":"conceptually_related_to","confidence":"INFERRED","confidence_score":0.75,"source_file":"a.go"}],` +
 			`"hyperedges":[]}`
 		out := map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": frag}}}}
 		_ = json.NewEncoder(w).Encode(out)

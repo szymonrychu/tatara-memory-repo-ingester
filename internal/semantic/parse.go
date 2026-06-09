@@ -51,14 +51,20 @@ func ParseFragment(repo string, body []byte) (analyze.Result, error) {
 	if err := json.Unmarshal(stripFences(body), &f); err != nil {
 		return analyze.Result{}, fmt.Errorf("parse extraction fragment: %w", err)
 	}
+	// remap: model-emitted id -> canonical conceptID for concept/rationale nodes.
+	// This prevents dangling edges when the LLM uses its own node ids in edge
+	// endpoints rather than the re-keyed concept:<repo>:<slug> form.
+	remap := map[string]string{}
 	var res analyze.Result
 	for _, n := range f.Nodes {
 		typ := entityTypeFor(n.FileType)
 		if typ == "" {
 			continue // code/document/paper/image: references an AST node, not re-emitted
 		}
+		cid := conceptID(repo, n.Label)
+		remap[n.ID] = cid
 		res.Entities = append(res.Entities, contract.Entity{
-			ID:         conceptID(repo, n.Label),
+			ID:         cid,
 			Name:       n.Label,
 			Type:       typ,
 			FilePath:   n.SourceFile,
@@ -67,10 +73,16 @@ func ParseFragment(repo string, body []byte) (analyze.Result, error) {
 			CapturedAt: n.CapturedAt,
 		})
 	}
+	remapID := func(id string) string {
+		if mapped, ok := remap[id]; ok {
+			return mapped
+		}
+		return id
+	}
 	for _, e := range f.Edges {
 		res.Edges = append(res.Edges, contract.Edge{
-			From:            e.Source,
-			To:              e.Target,
+			From:            remapID(e.Source),
+			To:              remapID(e.Target),
 			Relation:        e.Relation,
 			SrcFile:         e.SourceFile,
 			ConfidenceScore: e.ConfidenceScore,

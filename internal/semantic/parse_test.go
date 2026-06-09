@@ -8,6 +8,9 @@ import (
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/contract"
 )
 
+// sampleFragment uses model-emitted concept node ids ("retry_backoff", "why_jitter")
+// in edge endpoints - exactly as the LLM would produce them. ParseFragment must remap
+// those to their canonical concept:<repo>:<slug> form so edges are not dangling.
 const sampleFragment = `{
   "nodes": [
     {"id":"auth_session_validatetoken","label":"Validate Token","file_type":"code","source_file":"auth/session.go"},
@@ -58,6 +61,39 @@ func TestParseFragmentEdgesMapToContract(t *testing.T) {
 	require.InDelta(t, 0.85, sim.ConfidenceScore, 1e-9)
 	require.Equal(t, contract.TierInferred, sim.ConfidenceTier)
 	require.Equal(t, "http/client.go", sim.SrcFile)
+}
+
+// TestParseFragmentConceptEdgesRemapped asserts that edge endpoints whose model id
+// matches a concept/rationale node in the fragment are rewritten to their canonical
+// concept:<repo>:<slug> form. Without this remap the edges are dangling - the entity
+// is emitted as "concept:myrepo:retry-backoff" but the edge target stays "retry_backoff".
+func TestParseFragmentConceptEdgesRemapped(t *testing.T) {
+	res, err := ParseFragment("myrepo", []byte(sampleFragment))
+	require.NoError(t, err)
+
+	edgesByRelation := map[string]contract.Edge{}
+	for _, e := range res.Edges {
+		edgesByRelation[e.Relation] = e
+	}
+
+	// semantically_similar_to: target "retry_backoff" -> "concept:myrepo:retry-backoff"
+	sim := edgesByRelation[contract.RelSemanticallySimilar]
+	require.Equal(t, "auth_session_validatetoken", sim.From,
+		"non-concept source must pass through unchanged")
+	require.Equal(t, "concept:myrepo:retry-backoff", sim.To,
+		"concept node model id must be remapped to canonical concept:<repo>:<slug>")
+
+	// rationale_for: source "why_jitter" -> "concept:myrepo:why-jitter", target "retry_backoff" -> "concept:myrepo:retry-backoff"
+	rat := edgesByRelation[contract.RelRationaleFor]
+	require.Equal(t, "concept:myrepo:why-jitter", rat.From,
+		"rationale node model id must be remapped to canonical concept:<repo>:<slug>")
+	require.Equal(t, "concept:myrepo:retry-backoff", rat.To,
+		"concept node model id must be remapped to canonical concept:<repo>:<slug>")
+
+	// calls: both endpoints are non-concept; must pass through unchanged
+	calls := edgesByRelation[contract.RelCalls]
+	require.Equal(t, "a", calls.From)
+	require.Equal(t, "b", calls.To)
 }
 
 func TestParseFragmentConfidenceTiers(t *testing.T) {
