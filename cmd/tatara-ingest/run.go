@@ -224,7 +224,11 @@ func runSemantic(ctx context.Context, o options, cl *push.Client, commit string,
 	}
 	chunks := semantic.Chunk(loaded, semantic.DefaultChunkBudget())
 
-	client := llm.New(llm.ConfigFromEnv(getenv), cl.HTTP())
+	// Plain HTTP client, NOT cl.HTTP(): the memory client's transport injects the
+	// tatara OIDC client-credentials bearer on every request. OpenAI is not
+	// OIDC-gated and rejects that JWT with "invalid_issuer", so the LLM call must
+	// carry only its own OpenAI Bearer (set by the llm client).
+	client := llm.New(llm.ConfigFromEnv(getenv), &http.Client{Timeout: 60 * time.Second})
 	results := make([]analyze.Result, len(chunks))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(4)
