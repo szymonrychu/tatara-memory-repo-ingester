@@ -81,3 +81,51 @@ func keys(m map[string]any) []string {
 	}
 	return out
 }
+
+func TestEdgeConfidenceFields(t *testing.T) {
+	e := contract.Edge{
+		From: "a", To: "b", Relation: contract.RelCalls, SrcFile: "x.go",
+		ConfidenceScore: 0.98, ConfidenceTier: contract.TierInferred,
+		Properties: map[string]string{"resolution": contract.ResTypeResolved},
+	}
+	b, err := json.Marshal(e)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	require.ElementsMatch(t,
+		[]string{"from", "to", "relation", "src_file", "confidence_score", "confidence_tier", "properties"},
+		keys(got))
+	require.InDelta(t, 0.98, got["confidence_score"], 1e-9)
+	require.Equal(t, "INFERRED", got["confidence_tier"])
+}
+
+func TestEdgeConfidenceOmitEmpty(t *testing.T) {
+	e := contract.Edge{From: "a", To: "b", Relation: contract.RelCalls, SrcFile: "x.go"}
+	b, err := json.Marshal(e)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	_, hasScore := got["confidence_score"]
+	_, hasTier := got["confidence_tier"]
+	require.False(t, hasScore, "confidence_score must be absent when zero")
+	require.False(t, hasTier, "confidence_tier must be absent when empty")
+}
+
+func TestTierForScore(t *testing.T) {
+	cases := []struct {
+		name  string
+		score float64
+		tier  string
+	}{
+		{"extracted", 1.0, contract.TierExtracted},
+		{"inferred_high", 0.98, contract.TierInferred},
+		{"inferred_mid", 0.45, contract.TierInferred},
+		{"ambiguous_boundary", 0.3, contract.TierAmbiguous},
+		{"ambiguous_low", 0.0, contract.TierAmbiguous},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.tier, contract.TierForScore(tc.score))
+		})
+	}
+}

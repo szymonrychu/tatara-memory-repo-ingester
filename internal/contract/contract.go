@@ -15,11 +15,13 @@ type Entity struct {
 
 // Edge is a directed, typed relationship between two entities.
 type Edge struct {
-	From       string            `json:"from"`
-	To         string            `json:"to"`
-	Relation   string            `json:"relation"`
-	SrcFile    string            `json:"src_file"`
-	Properties map[string]string `json:"properties,omitempty"`
+	From            string            `json:"from"`
+	To              string            `json:"to"`
+	Relation        string            `json:"relation"`
+	SrcFile         string            `json:"src_file"`
+	ConfidenceScore float64           `json:"confidence_score,omitempty"` // 1.0 EXTRACTED, <1 INFERRED
+	ConfidenceTier  string            `json:"confidence_tier,omitempty"`  // EXTRACTED|INFERRED|AMBIGUOUS
+	Properties      map[string]string `json:"properties,omitempty"`
 }
 
 // Symbol roles.
@@ -168,5 +170,25 @@ func ConfidenceFor(resolution string) string {
 		return "0.2"
 	default:
 		return "0.0"
+	}
+}
+
+// Confidence tier values (typed column on code_edges; promoted from the scalar score).
+const (
+	TierExtracted = "EXTRACTED"
+	TierInferred  = "INFERRED"
+	TierAmbiguous = "AMBIGUOUS"
+)
+
+// TierForScore maps a confidence score to a tier:
+// 1.0 -> EXTRACTED; (0.3,1.0) -> INFERRED; <=0.3 -> AMBIGUOUS.
+func TierForScore(score float64) string {
+	switch {
+	case score >= 1.0:
+		return TierExtracted
+	case score > 0.3:
+		return TierInferred
+	default:
+		return TierAmbiguous
 	}
 }
