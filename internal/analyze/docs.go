@@ -35,9 +35,15 @@ func (docsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) 
 		if strings.ToLower(filepath.Ext(f)) == ".txt" {
 			lang = "text"
 		}
+		res.Entities = append(res.Entities, contract.Entity{
+			ID:       "doc:file:" + f,
+			Name:     f,
+			Type:     contract.EntityDocFile,
+			FilePath: f,
+		})
 		res.Chunks = append(res.Chunks, contract.Chunk{
-			EntityID: "file:" + f,
-			Type:     contract.EntityFile,
+			EntityID: "doc:file:" + f,
+			Type:     contract.EntityDocFile,
 			FilePath: f,
 			Language: lang,
 			Header:   "[doc] " + f,
