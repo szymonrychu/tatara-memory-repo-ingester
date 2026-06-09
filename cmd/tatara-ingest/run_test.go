@@ -193,6 +193,43 @@ func TestRunRenameOldPathPurgedNewPathIngested(t *testing.T) {
 	require.Contains(t, capturedPush.Files, "new.go", "rename new-path must be in code-graph Files")
 }
 
+// TestRunEmptyChangesetIsNoOp asserts that an incremental run with since==HEAD
+// (no new commits) returns nil WITHOUT calling /code-graph:bulk or /memories:bulk.
+func TestRunEmptyChangesetIsNoOp(t *testing.T) {
+	dir := t.TempDir()
+	for _, a := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
+		c := exec.Command("git", a...)
+		c.Dir = dir
+		require.NoError(t, c.Run())
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "doc.md"), []byte("# Doc\n\nbody\n"), 0o644))
+	head := commitAll(t, dir, "init")
+
+	var graphCalled, chunksCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph:bulk":
+			graphCalled = true
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"error":"codegraph: invalid push scope: files required"}`))
+		case "/memories:bulk":
+			chunksCalled = true
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	// since==HEAD means zero changed files - must be a successful no-op
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, since: head}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+	require.False(t, graphCalled, "/code-graph:bulk must NOT be called for empty changeset")
+	require.False(t, chunksCalled, "/memories:bulk must NOT be called for empty changeset")
+}
+
 // commitAll commits all changes and returns HEAD.
 func commitAll(t *testing.T, dir, msg string) string {
 	t.Helper()
