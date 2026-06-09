@@ -59,6 +59,22 @@ func byPath(c walk.Changes) map[string]walk.Change {
 	return m
 }
 
+func TestMissingSinceFallsBackToFull(t *testing.T) {
+	dir := gitRepo(t)
+	write(t, dir, "a.go", "package a")
+	write(t, dir, "b.go", "package b")
+	commit(t, dir, "init")
+
+	// A since SHA that does not exist in this repo: diff must error and fall back.
+	got, err := walk.Diff(dir, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", false)
+	require.NoError(t, err, "missing since must not hard-fail")
+	require.True(t, got.FullSet, "fallback uses ls-files full set")
+	m := byPath(got)
+	require.Len(t, m, 2)
+	require.Equal(t, 'A', m["a.go"].Status)
+	require.Equal(t, 'A', m["b.go"].Status)
+}
+
 func TestSinceDiffClassifiesAddModifyDelete(t *testing.T) {
 	dir := gitRepo(t)
 	write(t, dir, "keep.go", "package a")
