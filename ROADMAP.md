@@ -2,7 +2,8 @@
 
 Shipped: MVP (walker + 5 analyzers + docs + push), M2-B cross-repo
 provides/requires (Go/Python/JS), Go tree-sitter fallback for non-buildable
-packages, M5 SCIP v1 (`--scip` intra-repo graph ingestion).
+packages, M5 SCIP v1 (`--scip` intra-repo graph ingestion), 0.2.6 bulk-repo
+contract fix (repo field in /memories:bulk body).
 
 Open:
 - M5 SCIP cross-repo: parse import/export monikers into cross_repo_symbols

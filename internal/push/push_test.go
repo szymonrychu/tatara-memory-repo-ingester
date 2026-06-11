@@ -52,7 +52,7 @@ func TestPushChunksPollsToTerminal(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
-	err := c.PushChunks(context.Background(), nil, []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
+	err := c.PushChunks(context.Background(), "r", nil, []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, polls, 2)
 }
@@ -68,7 +68,7 @@ func TestPushChunksPartialIsError(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
-	err := c.PushChunks(context.Background(), nil, []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
+	err := c.PushChunks(context.Background(), "r", nil, []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
 	require.Error(t, err)
 }
 
@@ -86,7 +86,7 @@ func TestPushChunksSendsReconcileFiles(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
-	err := c.PushChunks(context.Background(),
+	err := c.PushChunks(context.Background(), "r",
 		[]string{"a.go", "gone.go"},
 		[]contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
 	require.NoError(t, err)
@@ -111,11 +111,60 @@ func TestPushChunksReconcileOnlyDeletion(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
-	err := c.PushChunks(context.Background(), []string{"gone.go"}, nil)
+	err := c.PushChunks(context.Background(), "r", []string{"gone.go"}, nil)
 	require.NoError(t, err)
 	require.True(t, posted, "deletion-only reconcile must still POST /memories:bulk")
 	require.Equal(t, []string{"gone.go"}, gotReq.ReconcileFiles)
 	require.Empty(t, gotReq.Items)
+}
+
+func TestPushChunksSendsRepoWhenReconciling(t *testing.T) {
+	// RED: PushChunks must include "repo" in the JSON body when reconcile_files is
+	// non-empty. Without the Repo field the memory API returns 400
+	// {"error":"repo is required when reconcile_files is set"}.
+	cases := []struct {
+		name           string
+		repo           string
+		reconcileFiles []string
+		items          []contract.IngestItem
+		wantRepo       string
+	}{
+		{
+			name:           "reconcile with items",
+			repo:           "tatara-cli",
+			reconcileFiles: []string{"a.go", "gone.go"},
+			items:          []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}},
+			wantRepo:       "tatara-cli",
+		},
+		{
+			name:           "reconcile only deletion",
+			repo:           "tatara-memory",
+			reconcileFiles: []string{"gone.go"},
+			items:          nil,
+			wantRepo:       "tatara-memory",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotReq contract.BulkMemoriesRequest
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/memories:bulk":
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&gotReq))
+					w.WriteHeader(202)
+					_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: contract.JobSucceeded})
+				case strings.HasPrefix(r.URL.Path, "/ingest-jobs/"):
+					_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: contract.JobSucceeded})
+				}
+			}))
+			defer srv.Close()
+			c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+			err := c.PushChunks(context.Background(), tc.repo, tc.reconcileFiles, tc.items)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantRepo, gotReq.Repo, "repo must be set in /memories:bulk body")
+			require.ElementsMatch(t, tc.reconcileFiles, gotReq.ReconcileFiles)
+		})
+	}
 }
 
 func TestPushChunksNoopWhenNothingToDo(t *testing.T) {
@@ -127,7 +176,7 @@ func TestPushChunksNoopWhenNothingToDo(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
-	require.NoError(t, c.PushChunks(context.Background(), nil, nil))
+	require.NoError(t, c.PushChunks(context.Background(), "", nil, nil))
 	require.False(t, posted, "no reconcile and no items must not POST")
 }
 

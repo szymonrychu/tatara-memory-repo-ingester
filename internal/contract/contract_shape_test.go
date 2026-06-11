@@ -84,6 +84,7 @@ func keys(m map[string]any) []string {
 
 func TestBulkMemoriesRequestShape(t *testing.T) {
 	req := contract.BulkMemoriesRequest{
+		Repo:           "tatara-cli",
 		ReconcileFiles: []string{"a.go", "b.md"},
 		Items:          []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}},
 	}
@@ -91,8 +92,19 @@ func TestBulkMemoriesRequestShape(t *testing.T) {
 	require.NoError(t, err)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(b, &got))
-	require.ElementsMatch(t, []string{"reconcile_files", "items"}, keys(got))
+	require.ElementsMatch(t, []string{"repo", "reconcile_files", "items"}, keys(got))
+	require.Equal(t, "tatara-cli", got["repo"])
 	require.Len(t, got["reconcile_files"].([]any), 2)
+}
+
+func TestBulkMemoriesRequestRepoOmitEmpty(t *testing.T) {
+	req := contract.BulkMemoriesRequest{Items: []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}}}
+	b, err := json.Marshal(req)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	_, has := got["repo"]
+	require.False(t, has, "repo must be absent when empty")
 }
 
 func TestBulkMemoriesRequestReconcileOmitEmpty(t *testing.T) {

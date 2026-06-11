@@ -107,7 +107,7 @@ func run(ctx context.Context, o options, hc *http.Client) error {
 	if changes.FullSet {
 		reconcile = nil // first/full ingest is insert-only (no reconcile)
 	}
-	if err := cl.PushChunks(ctx, reconcile, push.ItemsFromChunks(o.repoName, agg.Chunks)); err != nil {
+	if err := cl.PushChunks(ctx, o.repoName, reconcile, push.ItemsFromChunks(o.repoName, agg.Chunks)); err != nil {
 		return err
 	}
 

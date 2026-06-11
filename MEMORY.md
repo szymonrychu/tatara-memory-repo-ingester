@@ -1,5 +1,6 @@
 # MEMORY.md - tatara-memory-repo-ingester
 
+- 2026-06-12 (0.2.6): Fixed reingest Job 400 from /memories:bulk: BulkMemoriesRequest was missing the `repo` field (omitempty, omitted when blank), and PushChunks built the body without setting it. Memory API requires `repo` when `reconcile_files` is non-empty. Fix: added `Repo string json:"repo,omitempty"` to BulkMemoriesRequest, added `repo string` first arg to PushChunks, updated run.go call site to pass `o.repoName`. Chart appVersion bumped 0.1.0->0.2.6 (was stale vs deployed 0.2.5).
 - 2026-06-08 (0.2.2): Bundled `kubectl` (pinned v1.33, the cluster minor) into the
   runtime image. The operator's ingest Job runs `tatara-ingest && kubectl patch
   configmap <result> -p {sha}` (in-cluster SA auth) to report the ingested HEAD;
