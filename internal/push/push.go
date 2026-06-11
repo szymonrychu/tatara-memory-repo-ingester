@@ -35,15 +35,17 @@ func (c *Client) PushGraph(ctx context.Context, p contract.GraphPush) (contract.
 }
 
 // PushChunks posts a reconcile-aware bulk and polls the resulting job to a
-// terminal state. reconcileFiles, when non-empty, instructs the server to purge
-// prior memories for each file before inserting items. When both reconcileFiles
-// and items are empty there is nothing to do.
-func (c *Client) PushChunks(ctx context.Context, reconcileFiles []string, items []contract.IngestItem) error {
+// terminal state. repo is the repository identifier sent as the JSON "repo"
+// field; the server requires it when reconcileFiles is non-empty. reconcileFiles,
+// when non-empty, instructs the server to purge prior memories for each file
+// before inserting items. When both reconcileFiles and items are empty there is
+// nothing to do.
+func (c *Client) PushChunks(ctx context.Context, repo string, reconcileFiles []string, items []contract.IngestItem) error {
 	if len(items) == 0 && len(reconcileFiles) == 0 {
 		return nil
 	}
 	var job contract.IngestJob
-	body := contract.BulkMemoriesRequest{ReconcileFiles: reconcileFiles, Items: items}
+	body := contract.BulkMemoriesRequest{Repo: repo, ReconcileFiles: reconcileFiles, Items: items}
 	if err := c.do(ctx, http.MethodPost, "/memories:bulk", body, http.StatusAccepted, &job); err != nil {
 		return err
 	}
