@@ -11,7 +11,8 @@ formatters:
 
   settings:
     goimports:
-      local-prefixes: github.com/szymonrychu/tatara-memory-repo-ingester
+      local-prefixes:
+        - github.com/szymonrychu/tatara-memory-repo-ingester
 
 linters:
   default: none
