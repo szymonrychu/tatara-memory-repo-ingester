@@ -43,3 +43,10 @@
   inside a body may not attribute and can drop. Entities (one per definition) are solid;
   reference-edge coverage needs validation against a real scip-go index. Tracked in ROADMAP.
 - 2026-06-07: Runtime image swapped from distroless/cc-debian12:nonroot to golang:1.26-bookworm. Distroless had no git/go; ingest Jobs need to clone repos and run scip-go (Go toolchain). ENV GOTOOLCHAIN=auto added so ingested repos pinned to a newer Go still work. USER nonroot dropped (pod securityContext sets runAsUser).
+- 2026-06-12: PushChunks poll loop bounded by a maximum deadline (issue #1). New
+  config poll-timeout (default 10m, env POLL_TIMEOUT) threads through to push.New;
+  a non-terminal job now fails the push with "did not reach a terminal state within
+  <d>" instead of hanging forever on a stuck server-side job. Loop uses
+  context.WithTimeout(ctx, pollTimeout); parent ctx cancellation still returns
+  ctx.Err(). pollTimeout<=0 means unbounded. Not exposed in the helm chart (same as
+  poll-interval - both default in config and are env-only).

@@ -34,6 +34,7 @@ type options struct {
 	full            bool
 	baseURL         string
 	pollInterval    time.Duration
+	pollTimeout     time.Duration
 	crossRepoPrefix string
 	scipPath        string
 	scipRepo        string
@@ -95,7 +96,7 @@ func run(ctx context.Context, o options, hc *http.Client) error {
 	}
 
 	commit := headCommit(o.repoRoot)
-	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval))
+	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval), pollTimeoutOr(o.pollTimeout))
 	if _, err := cl.PushGraph(ctx, contract.GraphPush{
 		Repo: o.repoName, Commit: commit, Extractor: contract.ExtractorAST, Files: touched,
 		Entities: agg.Entities, Edges: agg.Edges, Symbols: agg.Symbols,
@@ -131,13 +132,20 @@ func pollOr(d time.Duration) time.Duration {
 	return d
 }
 
+func pollTimeoutOr(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 10 * time.Minute
+	}
+	return d
+}
+
 func runSCIP(ctx context.Context, o options, hc *http.Client) error {
 	start := time.Now()
 	gp, err := scip.Parse(o.scipPath, o.scipRepo)
 	if err != nil {
 		return err
 	}
-	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval))
+	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval), pollTimeoutOr(o.pollTimeout))
 	if _, err := cl.PushGraph(ctx, gp); err != nil {
 		return err
 	}

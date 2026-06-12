@@ -17,6 +17,7 @@ func TestLoadFromEnv(t *testing.T) {
 		"oidc-client-secret": "s3cret",
 		"oidc-audience":      "tatara-memory",
 		"poll-interval":      "2s",
+		"poll-timeout":       "5m",
 		"http-timeout":       "30s",
 	}
 	c, err := config.Load(func(k string) string { return env[k] })
@@ -24,6 +25,7 @@ func TestLoadFromEnv(t *testing.T) {
 	require.Equal(t, "https://memory.example", c.BaseURL) // trailing slash trimmed
 	require.Equal(t, "ingester", c.OIDCClientID)
 	require.Equal(t, 2*time.Second, c.PollInterval)
+	require.Equal(t, 5*time.Minute, c.PollTimeout)
 	require.Equal(t, 30*time.Second, c.HTTPTimeout)
 }
 
@@ -31,6 +33,7 @@ func TestLoadDefaults(t *testing.T) {
 	c, err := config.Load(func(string) string { return "" })
 	require.NoError(t, err)
 	require.Equal(t, 2*time.Second, c.PollInterval)
+	require.Equal(t, 10*time.Minute, c.PollTimeout)
 	require.Equal(t, 60*time.Second, c.HTTPTimeout)
 	require.Equal(t, "github.com/szymonrychu/", c.CrossRepoPrefix)
 }

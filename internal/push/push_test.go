@@ -25,7 +25,7 @@ func TestPushGraph(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(contract.PushResult{Repo: p.Repo, EntitiesUpserted: len(p.Entities)})
 	}))
 	defer srv.Close()
-	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond, time.Minute)
 	res, err := c.PushGraph(context.Background(), contract.GraphPush{Repo: "tatara-cli", Entities: []contract.Entity{{ID: "x"}}})
 	require.NoError(t, err)
 	require.Equal(t, 1, res.EntitiesUpserted)
@@ -51,7 +51,7 @@ func TestPushChunksPollsToTerminal(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond, time.Minute)
 	err := c.PushChunks(context.Background(), "r", nil, []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, polls, 2)
@@ -67,9 +67,28 @@ func TestPushChunksPartialIsError(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: contract.JobPartial, Failed: 1})
 	}))
 	defer srv.Close()
-	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond, time.Minute)
 	err := c.PushChunks(context.Background(), "r", nil, []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
 	require.Error(t, err)
+}
+
+func TestPushChunksTimesOutOnStuckJob(t *testing.T) {
+	// A job that never reaches a terminal state must not block forever: the
+	// bounded poll deadline fails the push with a clear timeout error.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/memories:bulk":
+			w.WriteHeader(202)
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: "running"})
+		case strings.HasPrefix(r.URL.Path, "/ingest-jobs/"):
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: "running"})
+		}
+	}))
+	defer srv.Close()
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond, 20*time.Millisecond)
+	err := c.PushChunks(context.Background(), "r", nil, []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "did not reach a terminal state")
 }
 
 func TestPushChunksSendsReconcileFiles(t *testing.T) {
@@ -85,7 +104,7 @@ func TestPushChunksSendsReconcileFiles(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond, time.Minute)
 	err := c.PushChunks(context.Background(), "r",
 		[]string{"a.go", "gone.go"},
 		[]contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
@@ -110,7 +129,7 @@ func TestPushChunksReconcileOnlyDeletion(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond, time.Minute)
 	err := c.PushChunks(context.Background(), "r", []string{"gone.go"}, nil)
 	require.NoError(t, err)
 	require.True(t, posted, "deletion-only reconcile must still POST /memories:bulk")
@@ -158,7 +177,7 @@ func TestPushChunksSendsRepoWhenReconciling(t *testing.T) {
 				}
 			}))
 			defer srv.Close()
-			c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+			c := push.New(srv.URL, http.DefaultClient, time.Millisecond, time.Minute)
 			err := c.PushChunks(context.Background(), tc.repo, tc.reconcileFiles, tc.items)
 			require.NoError(t, err)
 			require.Equal(t, tc.wantRepo, gotReq.Repo, "repo must be set in /memories:bulk body")
@@ -175,7 +194,7 @@ func TestPushChunksNoopWhenNothingToDo(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: contract.JobSucceeded})
 	}))
 	defer srv.Close()
-	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond, time.Minute)
 	require.NoError(t, c.PushChunks(context.Background(), "", nil, nil))
 	require.False(t, posted, "no reconcile and no items must not POST")
 }
@@ -189,7 +208,7 @@ func TestSemanticMissesReturnsMissPaths(t *testing.T) {
 		_ = json.NewEncoder(w).Encode([]string{"a.go", "c.go"})
 	}))
 	defer srv.Close()
-	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond, time.Minute)
 	misses, err := c.SemanticMisses(context.Background(), contract.SemanticMissesRequest{
 		Repo: "r",
 		Files: []contract.FileSHA{
@@ -210,13 +229,13 @@ func TestSemanticMissesPropagatesError(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"boom"}`))
 	}))
 	defer srv.Close()
-	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond, time.Minute)
 	_, err := c.SemanticMisses(context.Background(), contract.SemanticMissesRequest{Repo: "r"})
 	require.Error(t, err)
 }
 
 func TestClientHTTPAccessor(t *testing.T) {
 	hc := &http.Client{}
-	c := push.New("http://x", hc, time.Millisecond)
+	c := push.New("http://x", hc, time.Millisecond, time.Minute)
 	require.Same(t, hc, c.HTTP())
 }

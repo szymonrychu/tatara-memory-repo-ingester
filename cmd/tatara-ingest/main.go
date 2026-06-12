@@ -37,6 +37,7 @@ func realMain() error {
 		o.baseURL = cfg.BaseURL
 	}
 	o.pollInterval = cfg.PollInterval
+	o.pollTimeout = cfg.PollTimeout
 	o.crossRepoPrefix = cfg.CrossRepoPrefix
 
 	ctx := context.Background()

@@ -18,11 +18,14 @@ type Client struct {
 	base         string
 	http         *http.Client
 	pollInterval time.Duration
+	pollTimeout  time.Duration
 }
 
-// New constructs a push client.
-func New(base string, hc *http.Client, pollInterval time.Duration) *Client {
-	return &Client{base: base, http: hc, pollInterval: pollInterval}
+// New constructs a push client. pollTimeout bounds how long PushChunks waits for
+// a job to reach a terminal state; <= 0 means wait indefinitely (subject only to
+// context cancellation).
+func New(base string, hc *http.Client, pollInterval, pollTimeout time.Duration) *Client {
+	return &Client{base: base, http: hc, pollInterval: pollInterval, pollTimeout: pollTimeout}
 }
 
 // PushGraph posts a GraphPush synchronously and returns the reconciliation summary.
@@ -49,10 +52,19 @@ func (c *Client) PushChunks(ctx context.Context, repo string, reconcileFiles []s
 	if err := c.do(ctx, http.MethodPost, "/memories:bulk", body, http.StatusAccepted, &job); err != nil {
 		return err
 	}
+	pollCtx := ctx
+	if c.pollTimeout > 0 {
+		var cancel context.CancelFunc
+		pollCtx, cancel = context.WithTimeout(ctx, c.pollTimeout)
+		defer cancel()
+	}
 	for !job.Terminal() {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-pollCtx.Done():
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("ingest job %s did not reach a terminal state within %s (last status %q)", job.ID, c.pollTimeout, job.Status)
 		case <-time.After(c.pollInterval):
 		}
 		if err := c.do(ctx, http.MethodGet, "/ingest-jobs/"+job.ID, nil, http.StatusOK, &job); err != nil {

@@ -15,6 +15,7 @@ type Config struct {
 	OIDCClientSecret string
 	OIDCAudience     string
 	PollInterval     time.Duration
+	PollTimeout      time.Duration
 	HTTPTimeout      time.Duration
 	CrossRepoPrefix  string
 }
@@ -32,6 +33,7 @@ func Load(getenv func(string) string) (Config, error) {
 		OIDCClientSecret: getenv("oidc-client-secret"),
 		OIDCAudience:     getenv("oidc-audience"),
 		PollInterval:     2 * time.Second,
+		PollTimeout:      10 * time.Minute,
 		HTTPTimeout:      60 * time.Second,
 		CrossRepoPrefix:  crossRepoPrefix,
 	}
@@ -41,6 +43,13 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("parse poll-interval: %w", err)
 		}
 		c.PollInterval = d
+	}
+	if v := getenv("poll-timeout"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse poll-timeout: %w", err)
+		}
+		c.PollTimeout = d
 	}
 	if v := getenv("http-timeout"); v != "" {
 		d, err := time.ParseDuration(v)
