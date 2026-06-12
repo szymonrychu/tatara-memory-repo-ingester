@@ -60,6 +60,22 @@ jobs:
       - name: build
         run: make build
 
+  smoke:
+    runs-on: tatara-memory-repo-ingester
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential
+      - name: smoke
+        run: |
+          make build
+          ./bin/tatara-ingest --help || true
+
   image:
     if: ${{ github.event_name == 'push' }}
     runs-on: tatara-memory-repo-ingester
