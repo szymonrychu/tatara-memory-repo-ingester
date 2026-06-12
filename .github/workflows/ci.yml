@@ -25,6 +25,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential
       - name: gofmt
         run: test -z "$(gofmt -s -l .)" || { gofmt -s -l .; echo 'gofmt -s required'; exit 1; }
       - name: golangci-lint
@@ -43,8 +45,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: install gcc (CGO)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc
+      - name: build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential
       - name: test
         run: make test
 
@@ -57,8 +59,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: install gcc (CGO)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc
+      - name: build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential
       - name: build
         run: make build
 
