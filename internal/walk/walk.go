@@ -73,6 +73,9 @@ func parseDiff(repoRoot, out string) (Changes, error) {
 		}
 		fields := strings.Split(line, "\t")
 		code := fields[0]
+		if code == "" {
+			continue
+		}
 		switch code[0] {
 		case 'A', 'M':
 			if len(fields) < 2 {
