@@ -97,18 +97,23 @@ func (ha helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []strin
 			FilePath: chartEntityPath,
 		})
 
-		// subchart edges from dependencies
-		for _, dep := range manifest.Dependencies {
-			res.Edges = append(res.Edges, contract.Edge{
-				From:     chartID,
-				To:       "helm:chart:" + dep.Name,
-				Relation: contract.RelSubchart,
-				SrcFile:  chartEntityPath,
-				Properties: map[string]string{
-					"resolution": contract.ResTypeResolved,
-					"confidence": contract.ConfidenceFor(contract.ResTypeResolved),
-				},
-			})
+		// Subchart edges are sourced from Chart.yaml. Emit only when Chart.yaml is
+		// in the diff: unlike entities, the server does NOT exempt an empty edge
+		// src_file (every edge src_file must be in the pushed files), and an
+		// unchanged Chart.yaml means the dependency relationships are unchanged.
+		if chartEntityPath != "" {
+			for _, dep := range manifest.Dependencies {
+				res.Edges = append(res.Edges, contract.Edge{
+					From:     chartID,
+					To:       "helm:chart:" + dep.Name,
+					Relation: contract.RelSubchart,
+					SrcFile:  chartEntityPath,
+					Properties: map[string]string{
+						"resolution": contract.ResTypeResolved,
+						"confidence": contract.ConfidenceFor(contract.ResTypeResolved),
+					},
+				})
+			}
 		}
 
 		// Parse values.yaml if present in the file set

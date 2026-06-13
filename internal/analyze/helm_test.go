@@ -87,9 +87,6 @@ func TestHelmAnalyzer(t *testing.T) {
 	}
 
 	for _, e := range res.Edges {
-		if e.SrcFile == "" {
-			continue
-		}
 		require.True(t, scope[e.SrcFile],
 			"edge %q->%q has SrcFile %q not in files set", e.From, e.To, e.SrcFile)
 	}
@@ -106,8 +103,9 @@ func TestHelmAnalyzer(t *testing.T) {
 // TestHelmAnalyzer_IncrementalWithoutChartYAML covers the confirmed live bug:
 // incremental ingest where Chart.yaml was NOT modified (only templates/values changed).
 // Chart.yaml exists on disk so the chart is parseable, but it is NOT in the diff files set.
-// The helm_chart entity must use FilePath="" (repo-scoped) and all subchart edges SrcFile="".
-// tatara-memory exempts empty file_path from push-scope validation (commit 780b66f).
+// The helm_chart entity must use FilePath="" (repo-scoped; tatara-memory exempts
+// empty file_path, commit 780b66f), and subchart edges must be OMITTED entirely
+// (the server does NOT exempt an empty edge src_file).
 func TestHelmAnalyzer_IncrementalWithoutChartYAML(t *testing.T) {
 	a := analyze.NewHelm()
 
@@ -133,15 +131,16 @@ func TestHelmAnalyzer_IncrementalWithoutChartYAML(t *testing.T) {
 	require.Equal(t, "", chartEntity.FilePath,
 		"helm_chart entity FilePath must be empty when Chart.yaml is not in the diff files set")
 
-	// All subchart edges must also have SrcFile="" (same reasoning)
+	// No subchart edge may be emitted: it is Chart.yaml-sourced and the server
+	// rejects an empty edge src_file. mychart depends on common, so a buggy
+	// analyzer would emit mychart->common here.
 	for _, e := range res.Edges {
-		if e.Relation == contract.RelSubchart {
-			require.Equal(t, "", e.SrcFile,
-				"subchart edge %q->%q SrcFile must be empty when Chart.yaml is not in files", e.From, e.To)
-		}
+		require.NotEqual(t, contract.RelSubchart, e.Relation,
+			"no subchart edge may be emitted when Chart.yaml is not in the diff (got %q->%q)", e.From, e.To)
 	}
 
-	// Scope contract: no entity FilePath or edge SrcFile outside files set
+	// Scope contract: entity FilePath may be empty (repo-scoped) but every edge
+	// src_file MUST be in the files set (the server does not exempt empty here).
 	scope := map[string]bool{}
 	for _, f := range files {
 		scope[f] = true
@@ -154,9 +153,6 @@ func TestHelmAnalyzer_IncrementalWithoutChartYAML(t *testing.T) {
 			"entity %q has FilePath %q not in files set", e.ID, e.FilePath)
 	}
 	for _, e := range res.Edges {
-		if e.SrcFile == "" {
-			continue
-		}
 		require.True(t, scope[e.SrcFile],
 			"edge %q->%q has SrcFile %q not in files set", e.From, e.To, e.SrcFile)
 	}
