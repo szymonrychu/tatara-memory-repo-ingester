@@ -102,3 +102,95 @@ func TestHelmAnalyzer(t *testing.T) {
 	// At least one chunk emitted per template
 	require.NotEmpty(t, res.Chunks)
 }
+
+// TestHelmAnalyzer_IncrementalWithoutChartYAML covers the confirmed live bug:
+// incremental ingest where Chart.yaml was NOT modified (only templates/values changed).
+// Chart.yaml exists on disk so the chart is parseable, but it is NOT in the diff files set.
+// The helm_chart entity must use FilePath="" (repo-scoped) and all subchart edges SrcFile="".
+// tatara-memory exempts empty file_path from push-scope validation (commit 780b66f).
+func TestHelmAnalyzer_IncrementalWithoutChartYAML(t *testing.T) {
+	a := analyze.NewHelm()
+
+	// Chart.yaml is intentionally absent from files (incremental: only templates changed)
+	files := []string{
+		"mychart/values.yaml",
+		"mychart/templates/deployment.yaml",
+	}
+	res, err := a.Analyze(context.Background(), "testdata/helm", files)
+	require.NoError(t, err)
+
+	// helm_chart entity must be present (chart is still parsed from disk)
+	var chartEntity *contract.Entity
+	for i := range res.Entities {
+		if res.Entities[i].ID == "helm:chart:mychart" {
+			chartEntity = &res.Entities[i]
+			break
+		}
+	}
+	require.NotNil(t, chartEntity, "helm_chart entity must be emitted even when Chart.yaml not in files")
+
+	// KEY assertion: FilePath must be empty (repo-scoped) because Chart.yaml is not in files
+	require.Equal(t, "", chartEntity.FilePath,
+		"helm_chart entity FilePath must be empty when Chart.yaml is not in the diff files set")
+
+	// All subchart edges must also have SrcFile="" (same reasoning)
+	for _, e := range res.Edges {
+		if e.Relation == contract.RelSubchart {
+			require.Equal(t, "", e.SrcFile,
+				"subchart edge %q->%q SrcFile must be empty when Chart.yaml is not in files", e.From, e.To)
+		}
+	}
+
+	// Scope contract: no entity FilePath or edge SrcFile outside files set
+	scope := map[string]bool{}
+	for _, f := range files {
+		scope[f] = true
+	}
+	for _, e := range res.Entities {
+		if e.FilePath == "" {
+			continue
+		}
+		require.True(t, scope[e.FilePath],
+			"entity %q has FilePath %q not in files set", e.ID, e.FilePath)
+	}
+	for _, e := range res.Edges {
+		if e.SrcFile == "" {
+			continue
+		}
+		require.True(t, scope[e.SrcFile],
+			"edge %q->%q has SrcFile %q not in files set", e.From, e.To, e.SrcFile)
+	}
+}
+
+// TestHelmAnalyzer_FullIngestChartYAMLInFiles ensures the existing full-ingest behavior
+// (Chart.yaml IS in files) is not regressed: FilePath must equal the Chart.yaml path.
+func TestHelmAnalyzer_FullIngestChartYAMLInFiles(t *testing.T) {
+	a := analyze.NewHelm()
+
+	files := []string{
+		"mychart/Chart.yaml",
+		"mychart/values.yaml",
+		"mychart/templates/deployment.yaml",
+	}
+	res, err := a.Analyze(context.Background(), "testdata/helm", files)
+	require.NoError(t, err)
+
+	var chartEntity *contract.Entity
+	for i := range res.Entities {
+		if res.Entities[i].ID == "helm:chart:mychart" {
+			chartEntity = &res.Entities[i]
+			break
+		}
+	}
+	require.NotNil(t, chartEntity, "helm_chart entity must be emitted")
+	require.Equal(t, "mychart/Chart.yaml", chartEntity.FilePath,
+		"helm_chart entity FilePath must equal Chart.yaml path when it is in files")
+
+	// All subchart edges must have SrcFile = Chart.yaml path
+	for _, e := range res.Edges {
+		if e.Relation == contract.RelSubchart {
+			require.Equal(t, "mychart/Chart.yaml", e.SrcFile,
+				"subchart edge SrcFile must be Chart.yaml path when it is in files")
+		}
+	}
+}

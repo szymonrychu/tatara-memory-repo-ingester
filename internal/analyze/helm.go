@@ -79,12 +79,22 @@ func (ha helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []strin
 		chartName := manifest.Name
 		chartID := "helm:chart:" + chartName
 
-		// Emit helm_chart entity (FilePath = Chart.yaml rel path)
+		// chartEntityPath is non-empty only when Chart.yaml is in the diff files set.
+		// Empty means repo-scoped; tatara-memory exempts empty file_path from push-scope validation.
+		chartEntityPath := ""
+		for _, f := range cfiles {
+			if filepath.ToSlash(f) == chartYAMLPath {
+				chartEntityPath = chartYAMLPath
+				break
+			}
+		}
+
+		// Emit helm_chart entity
 		res.Entities = append(res.Entities, contract.Entity{
 			ID:       chartID,
 			Name:     chartName,
 			Type:     contract.EntityHelmChart,
-			FilePath: chartYAMLPath,
+			FilePath: chartEntityPath,
 		})
 
 		// subchart edges from dependencies
@@ -93,7 +103,7 @@ func (ha helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []strin
 				From:     chartID,
 				To:       "helm:chart:" + dep.Name,
 				Relation: contract.RelSubchart,
-				SrcFile:  chartYAMLPath,
+				SrcFile:  chartEntityPath,
 				Properties: map[string]string{
 					"resolution": contract.ResTypeResolved,
 					"confidence": contract.ConfidenceFor(contract.ResTypeResolved),
