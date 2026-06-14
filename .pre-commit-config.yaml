@@ -38,7 +38,7 @@ repos:
         pass_filenames: false
       - id: go-test
         name: go test (mise)
-        entry: mise run test
+        entry: env -u GIT_DIR mise run test
         language: system
         pass_filenames: false
         always_run: true
