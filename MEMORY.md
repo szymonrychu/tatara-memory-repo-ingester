@@ -1,6 +1,6 @@
 # MEMORY.md - tatara-memory-repo-ingester
 
-- 2026-06-14: Added .mise.toml (go=1.25.0, golangci-lint=2.12.2, CGO_ENABLED=1). CI replaced setup-go+golangci-lint-action with jdx/mise-action@v2 + mise run tasks. System gcc (build-essential) still required in test/build/smoke CI jobs - mise does not provide gcc and the ingester needs cgo for tree-sitter. lint job has no apt step (golangci-lint is pure binary).
+- 2026-06-14: Added .mise.toml (go=1.25.0, golangci-lint=2.12.2, CGO_ENABLED=1, min_version=2026.6.3). CI replaced setup-go+golangci-lint-action with jdx/mise-action@v2 + mise run tasks. System gcc (build-essential) required in ALL mise run jobs (lint/test/build/smoke) - mise does not provide gcc; golangci-lint typechecks internal/analyze which imports cgo (go-tree-sitter) and fails without gcc even in lint.
 - 2026-06-12 (0.2.6): Fixed reingest Job 400 from /memories:bulk: BulkMemoriesRequest was missing the `repo` field (omitempty, omitted when blank), and PushChunks built the body without setting it. Memory API requires `repo` when `reconcile_files` is non-empty. Fix: added `Repo string json:"repo,omitempty"` to BulkMemoriesRequest, added `repo string` first arg to PushChunks, updated run.go call site to pass `o.repoName`. Chart appVersion bumped 0.1.0->0.2.6 (was stale vs deployed 0.2.5).
 - 2026-06-08 (0.2.2): Bundled `kubectl` (pinned v1.33, the cluster minor) into the
   runtime image. The operator's ingest Job runs `tatara-ingest && kubectl patch
