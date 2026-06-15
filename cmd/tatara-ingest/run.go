@@ -71,7 +71,7 @@ func run(ctx context.Context, o options, hc *http.Client) error {
 		}
 	}
 
-	reg := analyze.Default(o.crossRepoPrefix)
+	reg := analyze.Default(o.crossRepoPrefix, o.repoRoot)
 	groups := reg.Group(analyzeFiles)
 
 	var agg analyze.Result
