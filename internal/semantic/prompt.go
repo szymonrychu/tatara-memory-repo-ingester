@@ -21,7 +21,8 @@ type PromptVars struct {
 
 // BuildPrompt returns the verbatim extraction-spec prompt with FILE_LIST,
 // CHUNK_NUM, and TOTAL_CHUNKS substituted. DEEP_MODE is always off.
-// Longer tokens are listed first so TOTAL_CHUNKS is not partially matched by CHUNK_NUM.
+// strings.NewReplacer uses longest-leftmost matching, so argument order does
+// not affect correctness; TOTAL_CHUNKS and CHUNK_NUM cannot partially collide.
 func BuildPrompt(v PromptVars) string {
 	r := strings.NewReplacer(
 		"TOTAL_CHUNKS", strconv.Itoa(v.TotalChunks),
