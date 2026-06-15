@@ -130,7 +130,7 @@ func (g goAnalyzer) Analyze(ctx context.Context, repoRoot string, files []string
 			if len(pkgFiles) == 0 {
 				continue
 			}
-			fallbackRes := fallbackAnalyzeGoPackage(g.log, modulePath, absRepoRoot, scope, pkgFiles)
+			fallbackRes := fallbackAnalyzeGoPackage(g.log, modulePath, absRepoRoot, pkgFiles)
 			res.Entities = append(res.Entities, fallbackRes.Entities...)
 			res.Edges = append(res.Edges, fallbackRes.Edges...)
 			res.Chunks = append(res.Chunks, fallbackRes.Chunks...)

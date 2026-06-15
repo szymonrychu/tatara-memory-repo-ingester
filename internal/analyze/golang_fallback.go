@@ -20,13 +20,12 @@ import (
 //
 // modulePath is the module path read from go.mod (e.g. "example.com/broken").
 // absRepoRoot is the absolute path to the repository root.
-// files is the full analyzer scope (repo-relative paths).
-// pkgFiles are the absolute paths of files belonging to this broken package.
+// pkgFiles are the absolute paths of files belonging to this broken package;
+// the caller is responsible for filtering them to the analysis scope before passing.
 func fallbackAnalyzeGoPackage(
 	log *slog.Logger,
 	modulePath string,
 	absRepoRoot string,
-	scope map[string]bool,
 	pkgFiles []string,
 ) Result {
 	lang := golang.GetLanguage()
@@ -43,9 +42,6 @@ func fallbackAnalyzeGoPackage(
 	parsed := make([]parsedFile, 0, len(pkgFiles))
 	for _, absPath := range pkgFiles {
 		rel := repoRelPath(absRepoRoot, absPath)
-		if !scope[rel] {
-			continue
-		}
 		src, err := os.ReadFile(absPath) //nolint:gosec
 		if err != nil {
 			log.Warn("fallback: cannot read file", slog.String("file", rel), slog.String("err", err.Error()))
