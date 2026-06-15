@@ -44,6 +44,8 @@ func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) 
 		root    *sitter.Node
 	}
 
+	var res Result
+
 	parsed := make([]parsedFile, 0, len(files))
 	for _, relPath := range files {
 		absPath := filepath.Join(repoRoot, relPath)
@@ -54,6 +56,7 @@ func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) 
 		root, err := sitter.ParseCtx(context.Background(), src, lang)
 		if err != nil {
 			j.log.Warn("tree-sitter parse error", slog.String("file", relPath), slog.String("err", err.Error()))
+			res.ParseErrors++
 			continue
 		}
 		parsed = append(parsed, parsedFile{
@@ -73,8 +76,6 @@ func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) 
 			repoIndex[name] = append(repoIndex[name], id)
 		}
 	}
-
-	var res Result
 
 	for _, pf := range parsed {
 		moduleDefs := jsFileDefs(pf.relPath, pf.root, pf.src)

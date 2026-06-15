@@ -44,6 +44,8 @@ func (p pythonAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 		root      *sitter.Node
 		defs      map[string]string
 	}
+	var res Result
+
 	parsed := make([]parsedFile, 0, len(files))
 	for _, relPath := range files {
 		absPath := filepath.Join(repoRoot, relPath)
@@ -54,6 +56,7 @@ func (p pythonAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 		root, err := sitter.ParseCtx(context.Background(), src, lang)
 		if err != nil {
 			p.log.Warn("tree-sitter parse error", slog.String("file", relPath), slog.String("err", err.Error()))
+			res.ParseErrors++
 			continue
 		}
 		moduleFQN := pathToFQN(relPath)
@@ -74,8 +77,6 @@ func (p pythonAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 			repoIndex[name] = append(repoIndex[name], id)
 		}
 	}
-
-	var res Result
 
 	for _, pf := range parsed {
 		// Reuse the cached module-level def map (scoped resolution).

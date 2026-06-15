@@ -143,6 +143,50 @@ func TestClassifyRef(t *testing.T) {
 	}
 }
 
+// TestGoPackageEntityDeferredToScope verifies that a go:package entity is NOT emitted
+// for packages that have no in-scope files. When analyzing only consumer/consumer.go,
+// the sample/pkg package has no in-scope funcs so its package entity must be absent.
+func TestGoPackageEntityDeferredToScope(t *testing.T) {
+	a := analyze.NewGo("example.com/dep")
+	// Only consumer.go is in scope; pkg/pkg.go and pkg/other.go are not.
+	res, err := a.Analyze(context.Background(), "testdata/go", []string{"consumer/consumer.go"})
+	require.NoError(t, err)
+
+	ids := map[string]bool{}
+	for _, e := range res.Entities {
+		ids[e.ID] = true
+	}
+	// consumer's own package entity is OK.
+	// But example.com/sample/pkg has no in-scope funcs -> no package entity.
+	require.False(t, ids["go:package:example.com/sample/pkg"],
+		"go:package:example.com/sample/pkg must not be emitted when no funcs from that package are in scope")
+}
+
+// TestGoRequiresSymbolsAreDeterministic verifies that repeated Analyze calls on the
+// same input produce the same SymbolRow slice order (requires rows sorted by pos).
+func TestGoRequiresSymbolsAreDeterministic(t *testing.T) {
+	a := analyze.NewGo("example.com/dep")
+	files := []string{"consumer/consumer.go"}
+
+	run1, err := a.Analyze(context.Background(), "testdata/go", files)
+	require.NoError(t, err)
+	run2, err := a.Analyze(context.Background(), "testdata/go", files)
+	require.NoError(t, err)
+
+	var reqs1, reqs2 []string
+	for _, s := range run1.Symbols {
+		if s.Role == contract.RoleRequires {
+			reqs1 = append(reqs1, s.Symbol+"|"+s.EntityID)
+		}
+	}
+	for _, s := range run2.Symbols {
+		if s.Role == contract.RoleRequires {
+			reqs2 = append(reqs2, s.Symbol+"|"+s.EntityID)
+		}
+	}
+	require.Equal(t, reqs1, reqs2, "requires SymbolRow order must be deterministic across runs")
+}
+
 func TestGoAnalyzer(t *testing.T) {
 	a := analyze.NewGo("github.com/szymonrychu/")
 	require.True(t, a.Match("pkg/pkg.go"))

@@ -91,6 +91,9 @@ func run(ctx context.Context, o options, hc *http.Client) error {
 		m.AnalyzerEntitiesTotal.WithLabelValues(a.Name()).Add(float64(len(res.Entities)))
 		m.AnalyzerEdgesTotal.WithLabelValues(a.Name()).Add(float64(len(res.Edges)))
 		m.AnalyzerDuration.WithLabelValues(a.Name()).Observe(aDur.Seconds())
+		if res.ParseErrors > 0 {
+			m.AnalyzerParseErrorsTotal.WithLabelValues(a.Name()).Add(float64(res.ParseErrors))
+		}
 		slog.Info("analyzer complete",
 			"analyzer", a.Name(),
 			"files", len(fs),

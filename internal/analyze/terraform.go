@@ -39,6 +39,7 @@ func (ta terraformAnalyzer) Analyze(_ context.Context, repoRoot string, files []
 		hclFile, diags := parser.ParseHCLFile(absPath)
 		if diags.HasErrors() {
 			ta.log.Warn("hcl parse error", "file", relPath, "err", diags.Error())
+			res.ParseErrors++
 			continue
 		}
 		body, ok := hclFile.Body.(*hclsyntax.Body)

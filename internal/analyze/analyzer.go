@@ -16,6 +16,10 @@ type Result struct {
 	Chunks     []contract.Chunk
 	Symbols    []contract.SymbolRow
 	Hyperedges []contract.Hyperedge
+	// ParseErrors counts per-file parse errors (tree-sitter / HCL / helm template)
+	// that were WARNed and skipped inside the analyzer. Callers should accumulate
+	// this value and feed it to the AnalyzerParseErrorsTotal metric.
+	ParseErrors int
 }
 
 // Analyzer extracts a code graph and chunks for one language/file class.

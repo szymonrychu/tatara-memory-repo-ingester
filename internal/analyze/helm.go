@@ -96,6 +96,7 @@ func (ha helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []strin
 		}
 		if err := sigsyaml.Unmarshal(rawChart, &manifest); err != nil {
 			ha.log.Warn("helm: cannot parse Chart.yaml", "path", chartYAMLPath, "err", err)
+			res.ParseErrors++
 			continue
 		}
 		chartName := manifest.Name
@@ -158,6 +159,7 @@ func (ha helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []strin
 				var flat map[string]any
 				if err := sigsyaml.Unmarshal(rawValues, &flat); err != nil {
 					ha.log.Warn("helm: cannot parse values.yaml", "path", valuesPath, "err", err)
+					res.ParseErrors++
 					break
 				}
 				// Sort keys for deterministic output (finding 10).
@@ -212,6 +214,7 @@ func (ha helmAnalyzer) processTemplate(repoRoot, relPath, chartName string, res 
 	t, err := template.New(filepath.Base(relPath)).Funcs(fm).Parse(content)
 	if err != nil {
 		ha.log.Warn("helm: cannot parse template", "path", relPath, "err", err)
+		res.ParseErrors++
 		return
 	}
 
