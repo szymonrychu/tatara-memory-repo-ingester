@@ -1,14 +1,17 @@
 package push_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/contract"
@@ -219,4 +222,83 @@ func TestClientHTTPAccessor(t *testing.T) {
 	hc := &http.Client{}
 	c := push.New("http://x", hc, time.Millisecond)
 	require.Same(t, hc, c.HTTP())
+}
+
+// TestPushGraphLogsInfoOnSuccess verifies that a successful PushGraph call
+// emits an INFO log with action, repo, duration_ms (hard rule 12).
+func TestPushGraphLogsInfoOnSuccess(t *testing.T) {
+	var logBuf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_ = json.NewEncoder(w).Encode(contract.PushResult{Repo: "myrepo", EntitiesUpserted: 1})
+	}))
+	defer srv.Close()
+
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	_, err := c.PushGraph(context.Background(), contract.GraphPush{Repo: "myrepo", Entities: []contract.Entity{{ID: "x"}}})
+	require.NoError(t, err)
+
+	logs := logBuf.String()
+	assert.Contains(t, logs, "PushGraph", "INFO log must mention the action")
+	assert.Contains(t, logs, "myrepo", "INFO log must mention the repo")
+	assert.Contains(t, logs, "duration_ms", "INFO log must include duration_ms")
+}
+
+// TestPushChunksLogsInfoOnSuccess verifies that a successful PushChunks call
+// emits an INFO log with action, repo, job_id, and duration_ms (hard rule 12).
+func TestPushChunksLogsInfoOnSuccess(t *testing.T) {
+	var logBuf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/memories:bulk":
+			w.WriteHeader(202)
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "job42", Status: contract.JobSucceeded, Total: 1, Done: 1})
+		default:
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "job42", Status: contract.JobSucceeded, Total: 1, Done: 1})
+		}
+	}))
+	defer srv.Close()
+
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	err := c.PushChunks(context.Background(), "myrepo", nil, []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
+	require.NoError(t, err)
+
+	logs := logBuf.String()
+	assert.Contains(t, logs, "PushChunks", "INFO log must mention the action")
+	assert.Contains(t, logs, "myrepo", "INFO log must mention the repo")
+	assert.Contains(t, logs, "duration_ms", "INFO log must include duration_ms")
+	assert.Contains(t, logs, "job42", "INFO log must include job_id")
+}
+
+// TestSemanticMissesLogsInfoOnSuccess verifies that SemanticMisses emits an
+// INFO log with action, repo, count, duration_ms (hard rule 12).
+func TestSemanticMissesLogsInfoOnSuccess(t *testing.T) {
+	var logBuf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_ = json.NewEncoder(w).Encode([]string{"a.go"})
+	}))
+	defer srv.Close()
+
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	misses, err := c.SemanticMisses(context.Background(), contract.SemanticMissesRequest{Repo: "myrepo"})
+	require.NoError(t, err)
+	require.Len(t, misses, 1)
+
+	logs := logBuf.String()
+	assert.Contains(t, logs, "SemanticMisses", "INFO log must mention the action")
+	assert.Contains(t, logs, "myrepo", "INFO log must mention the repo")
+	assert.Contains(t, logs, "duration_ms", "INFO log must include duration_ms")
 }

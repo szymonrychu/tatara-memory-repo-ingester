@@ -105,4 +105,19 @@ func TestParseBasic(t *testing.T) {
 	assert.Equal(t, "foo.go", edge.SrcFile)
 	assert.Equal(t, "type_resolved", edge.Properties["resolution"])
 	assert.Equal(t, "0.98", edge.Properties["confidence"])
+
+	// LineStart/LineEnd must be set from the definition occurrence Range.
+	// SCIP ranges are 0-based; we store 1-based line numbers (LineStart = range[0]+1).
+	for _, e := range gp.Entities {
+		switch e.ID {
+		case "scip:go:" + symA:
+			// Definition A: Range [0,0,5,0] -> LineStart=1, LineEnd=5
+			assert.Equal(t, 1, e.LineStart, "entity A LineStart must be 1-based start line")
+			assert.Equal(t, 5, e.LineEnd, "entity A LineEnd must be end line")
+		case "scip:go:" + symB:
+			// Definition B: Range [10,0,15,0] -> LineStart=11, LineEnd=15
+			assert.Equal(t, 11, e.LineStart, "entity B LineStart must be 1-based start line")
+			assert.Equal(t, 15, e.LineEnd, "entity B LineEnd must be end line")
+		}
+	}
 }

@@ -67,14 +67,17 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 		defBySymbol := make(map[string]*scipbindings.Occurrence, len(defs))
 		for _, d := range defs {
 			defBySymbol[d.Symbol] = d
+			lineStart, lineEnd := occLineStartEnd(d.Range)
 			si, ok := symInfo[d.Symbol]
 			if !ok {
 				// No SymbolInformation: emit a minimal entity.
 				entities = append(entities, contract.Entity{
-					ID:       entityID(lang, d.Symbol),
-					Name:     lastComponent(d.Symbol),
-					Type:     "scip_symbol",
-					FilePath: doc.RelativePath,
+					ID:        entityID(lang, d.Symbol),
+					Name:      lastComponent(d.Symbol),
+					Type:      "scip_symbol",
+					FilePath:  doc.RelativePath,
+					LineStart: lineStart,
+					LineEnd:   lineEnd,
 					Properties: map[string]string{
 						"scip_kind": "unspecified",
 					},
@@ -83,10 +86,12 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 			}
 			kind := si.Kind
 			entities = append(entities, contract.Entity{
-				ID:       entityID(lang, si.Symbol),
-				Name:     displayName(si),
-				Type:     scipKind(kind),
-				FilePath: doc.RelativePath,
+				ID:        entityID(lang, si.Symbol),
+				Name:      displayName(si),
+				Type:      scipKind(kind),
+				FilePath:  doc.RelativePath,
+				LineStart: lineStart,
+				LineEnd:   lineEnd,
 				Properties: map[string]string{
 					"scip_kind": kind.String(),
 				},
@@ -239,4 +244,17 @@ func occEndLine(r []int32) (int32, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// occLineStartEnd returns 1-based LineStart and 0-based LineEnd from a SCIP
+// occurrence Range. SCIP lines are 0-based; we convert start to 1-based to
+// match the contract's convention (AST analyzers also emit 1-based LineStart).
+// Returns (0, 0) when the range is malformed.
+func occLineStartEnd(r []int32) (lineStart, lineEnd int) {
+	start, ok1 := occStartLine(r)
+	end, ok2 := occEndLine(r)
+	if !ok1 || !ok2 {
+		return 0, 0
+	}
+	return int(start) + 1, int(end)
 }

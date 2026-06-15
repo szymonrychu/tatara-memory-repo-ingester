@@ -17,7 +17,7 @@ import (
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if err := realMain(); err != nil {
 		slog.Error("ingest failed", "error", err)
 		os.Exit(1)

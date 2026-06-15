@@ -1,9 +1,12 @@
 package analyze_test
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/analyze"
@@ -36,6 +39,24 @@ func TestDocsAnalyzerNoFrontmatter(t *testing.T) {
 	require.Empty(t, e.Author)
 	require.Empty(t, e.CapturedAt)
 	require.Contains(t, res.Chunks[0].Body, "Some prose.")
+}
+
+// TestDocsAnalyzerWarnsOnUnreadableFile verifies that an unreadable file path
+// produces a WARN log entry (rule 12) and does not cause an error or panic.
+// Before the fix, a missing file was silently skipped (bare continue, no log).
+func TestDocsAnalyzerWarnsOnUnreadableFile(t *testing.T) {
+	var logBuf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	a := analyze.NewDocs()
+	// "no_such_file.md" does not exist in testdata/docs.
+	res, err := a.Analyze(context.Background(), "testdata/docs", []string{"no_such_file.md"})
+	require.NoError(t, err, "unreadable file must not fail the run")
+	require.Empty(t, res.Entities, "unreadable file must not produce entities")
+
+	assert.Contains(t, logBuf.String(), "no_such_file.md", "WARN log must mention the skipped path")
 }
 
 func TestDocsAnalyzer(t *testing.T) {

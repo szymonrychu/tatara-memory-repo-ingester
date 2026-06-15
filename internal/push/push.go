@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -27,10 +28,18 @@ func New(base string, hc *http.Client, pollInterval time.Duration) *Client {
 
 // PushGraph posts a GraphPush synchronously and returns the reconciliation summary.
 func (c *Client) PushGraph(ctx context.Context, p contract.GraphPush) (contract.PushResult, error) {
+	start := time.Now()
 	var res contract.PushResult
 	if err := c.do(ctx, http.MethodPost, "/code-graph:bulk", p, http.StatusOK, &res); err != nil {
 		return contract.PushResult{}, err
 	}
+	slog.Info("PushGraph",
+		"action", "PushGraph",
+		"repo", p.Repo,
+		"entities", len(p.Entities),
+		"edges", len(p.Edges),
+		"files", len(p.Files),
+		"duration_ms", time.Since(start).Milliseconds())
 	return res, nil
 }
 
@@ -44,12 +53,15 @@ func (c *Client) PushChunks(ctx context.Context, repo string, reconcileFiles []s
 	if len(items) == 0 && len(reconcileFiles) == 0 {
 		return nil
 	}
+	start := time.Now()
+	var polls int
 	var job contract.IngestJob
 	body := contract.BulkMemoriesRequest{Repo: repo, ReconcileFiles: reconcileFiles, Items: items}
 	if err := c.do(ctx, http.MethodPost, "/memories:bulk", body, http.StatusAccepted, &job); err != nil {
 		return err
 	}
 	for !job.Terminal() {
+		polls++
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -62,16 +74,31 @@ func (c *Client) PushChunks(ctx context.Context, repo string, reconcileFiles []s
 	if job.Status != contract.JobSucceeded {
 		return fmt.Errorf("ingest job %s ended %s (failed=%d)", job.ID, job.Status, job.Failed)
 	}
+	slog.Info("PushChunks",
+		"action", "PushChunks",
+		"repo", repo,
+		"job_id", job.ID,
+		"items", len(items),
+		"reconcile_files", len(reconcileFiles),
+		"polls", polls,
+		"duration_ms", time.Since(start).Milliseconds())
 	return nil
 }
 
 // SemanticMisses asks the server which of the supplied files need semantic
 // re-extraction (stored content_sha differs or is absent) and returns their paths.
 func (c *Client) SemanticMisses(ctx context.Context, req contract.SemanticMissesRequest) ([]string, error) {
+	start := time.Now()
 	var misses []string
 	if err := c.do(ctx, http.MethodPost, "/code-graph/semantic-misses", req, http.StatusOK, &misses); err != nil {
 		return nil, err
 	}
+	slog.Info("SemanticMisses",
+		"action", "SemanticMisses",
+		"repo", req.Repo,
+		"files_queried", len(req.Files),
+		"misses", len(misses),
+		"duration_ms", time.Since(start).Milliseconds())
 	return misses, nil
 }
 

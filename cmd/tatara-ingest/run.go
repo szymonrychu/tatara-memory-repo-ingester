@@ -16,6 +16,7 @@ import (
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/analyze"
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/contract"
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/llm"
+	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/obs"
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/push"
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/scip"
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/semantic"
@@ -41,8 +42,11 @@ type options struct {
 }
 
 func run(ctx context.Context, o options, hc *http.Client) error {
+	m := obs.New()
+	m.IngestRunsTotal.Inc()
+
 	if o.scipPath != "" {
-		return runSCIP(ctx, o, hc)
+		return runSCIP(ctx, o, hc, m)
 	}
 	start := time.Now()
 	changes, err := walk.Diff(o.repoRoot, o.since, o.full)
@@ -76,11 +80,23 @@ func run(ctx context.Context, o options, hc *http.Client) error {
 		if len(fs) == 0 {
 			continue
 		}
+		aStart := time.Now()
 		res, err := a.Analyze(ctx, o.repoRoot, fs)
+		aDur := time.Since(aStart)
 		if err != nil {
 			slog.Warn("analyzer failed", "analyzer", a.Name(), "error", err)
+			m.AnalyzerParseErrorsTotal.WithLabelValues(a.Name()).Inc()
 			continue
 		}
+		m.AnalyzerEntitiesTotal.WithLabelValues(a.Name()).Add(float64(len(res.Entities)))
+		m.AnalyzerEdgesTotal.WithLabelValues(a.Name()).Add(float64(len(res.Edges)))
+		m.AnalyzerDuration.WithLabelValues(a.Name()).Observe(aDur.Seconds())
+		slog.Info("analyzer complete",
+			"analyzer", a.Name(),
+			"files", len(fs),
+			"entities", len(res.Entities),
+			"edges", len(res.Edges),
+			"duration_ms", aDur.Milliseconds())
 		agg.Entities = append(agg.Entities, res.Entities...)
 		agg.Edges = append(agg.Edges, res.Edges...)
 		agg.Chunks = append(agg.Chunks, res.Chunks...)
@@ -96,24 +112,35 @@ func run(ctx context.Context, o options, hc *http.Client) error {
 
 	commit := headCommit(o.repoRoot)
 	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval))
+
+	pushStart := time.Now()
 	if _, err := cl.PushGraph(ctx, contract.GraphPush{
 		Repo: o.repoName, Commit: commit, Extractor: contract.ExtractorAST, Files: touched,
 		Entities: agg.Entities, Edges: agg.Edges, Symbols: agg.Symbols,
 		Hyperedges: agg.Hyperedges,
 	}); err != nil {
+		m.PushRequestsTotal.WithLabelValues("/code-graph:bulk", "err").Inc()
 		return err
 	}
+	m.PushRequestsTotal.WithLabelValues("/code-graph:bulk", "ok").Inc()
+	m.IngestStageDuration.WithLabelValues("push_graph").Observe(time.Since(pushStart).Seconds())
+
 	reconcile := touched
 	if changes.FullSet {
 		reconcile = nil // first/full ingest is insert-only (no reconcile)
 	}
+	chunksStart := time.Now()
 	if err := cl.PushChunks(ctx, o.repoName, reconcile, push.ItemsFromChunks(o.repoName, agg.Chunks)); err != nil {
+		m.PushRequestsTotal.WithLabelValues("/memories:bulk", "err").Inc()
 		return err
 	}
+	m.PushRequestsTotal.WithLabelValues("/memories:bulk", "ok").Inc()
+	m.IngestStageDuration.WithLabelValues("push_chunks").Observe(time.Since(chunksStart).Seconds())
 
 	// Best-effort semantic stage: errors are logged and never fail the ingest.
-	runSemantic(ctx, o, cl, commit, changes)
+	runSemantic(ctx, o, cl, commit, changes, m)
 
+	m.IngestStageDuration.WithLabelValues("total").Observe(time.Since(start).Seconds())
 	slog.Info("ingest complete",
 		"repo", o.repoName, "files", len(touched),
 		"analyzed", len(analyzeFiles),
@@ -131,22 +158,28 @@ func pollOr(d time.Duration) time.Duration {
 	return d
 }
 
-func runSCIP(ctx context.Context, o options, hc *http.Client) error {
+func runSCIP(ctx context.Context, o options, hc *http.Client, m *obs.Metrics) error {
 	start := time.Now()
 	gp, err := scip.Parse(o.scipPath, o.scipRepo)
 	if err != nil {
 		return err
 	}
+	m.SCIPEntitiesTotal.Add(float64(len(gp.Entities)))
+	m.SCIPEdgesTotal.Add(float64(len(gp.Edges)))
 	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval))
 	if _, err := cl.PushGraph(ctx, gp); err != nil {
+		m.PushRequestsTotal.WithLabelValues("/code-graph:bulk", "err").Inc()
 		return err
 	}
+	m.PushRequestsTotal.WithLabelValues("/code-graph:bulk", "ok").Inc()
+	dur := time.Since(start)
+	m.IngestStageDuration.WithLabelValues("scip").Observe(dur.Seconds())
 	slog.Info("scip ingest complete",
 		"repo", o.scipRepo,
 		"files", len(gp.Files),
 		"entities", len(gp.Entities),
 		"edges", len(gp.Edges),
-		"duration_ms", time.Since(start).Milliseconds())
+		"duration_ms", dur.Milliseconds())
 	return nil
 }
 
@@ -171,7 +204,7 @@ func shaFor(changes walk.Changes, path string) string {
 // runSemantic is the best-effort LLM extraction stage. It is a no-op when the
 // OpenAI key is unset or SEMANTIC_INGEST=false. Any failure (misses call, LLM,
 // parse, push) is logged and swallowed so it never fails the AST ingest.
-func runSemantic(ctx context.Context, o options, cl *push.Client, commit string, changes walk.Changes) {
+func runSemantic(ctx context.Context, o options, cl *push.Client, commit string, changes walk.Changes, m *obs.Metrics) {
 	getenv := o.getenv
 	if getenv == nil {
 		getenv = os.Getenv
@@ -201,8 +234,11 @@ func runSemantic(ctx context.Context, o options, cl *push.Client, commit string,
 	misses, err := cl.SemanticMisses(ctx, req)
 	if err != nil {
 		slog.Warn("semantic-misses failed; skipping semantic stage", "repo", o.repoName, "error", err)
+		m.PushRequestsTotal.WithLabelValues("/code-graph/semantic-misses", "err").Inc()
 		return
 	}
+	m.PushRequestsTotal.WithLabelValues("/code-graph/semantic-misses", "ok").Inc()
+	m.SemanticMissesTotal.Add(float64(len(misses)))
 	if len(misses) == 0 {
 		return
 	}
@@ -238,6 +274,11 @@ func runSemantic(ctx context.Context, o options, cl *push.Client, commit string,
 			res, ok := extractChunk(gctx, o.repoName, client, ck, i+1, len(chunks))
 			if ok {
 				results[i] = res
+				m.SemanticChunkExtractionsTotal.WithLabelValues("ok").Inc()
+				m.LLMCallsTotal.WithLabelValues("ok").Inc()
+			} else {
+				m.SemanticChunkExtractionsTotal.WithLabelValues("fail").Inc()
+				m.LLMCallsTotal.WithLabelValues("fail").Inc()
 			}
 			return nil // best-effort: never propagate a chunk error
 		})
@@ -263,8 +304,10 @@ func runSemantic(ctx context.Context, o options, cl *push.Client, commit string,
 		FileSHAs:   fileSHAs,
 	}); err != nil {
 		slog.Warn("semantic graph push failed", "repo", o.repoName, "error", err)
+		m.PushRequestsTotal.WithLabelValues("/code-graph:bulk[semantic]", "err").Inc()
 		return
 	}
+	m.PushRequestsTotal.WithLabelValues("/code-graph:bulk[semantic]", "ok").Inc()
 	slog.Info("semantic stage complete",
 		"repo", o.repoName, "misses", len(misses), "chunks", len(chunks),
 		"entities", len(aggSem.Entities), "edges", len(aggSem.Edges), "hyperedges", len(aggSem.Hyperedges))
