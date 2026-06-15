@@ -78,6 +78,7 @@ type docFrontmatter struct {
 // a zero docFrontmatter and the original content unchanged. A malformed block is
 // ignored (zero provenance) and the original content is returned.
 func splitFrontmatter(content string) (docFrontmatter, string) {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
 	if !strings.HasPrefix(content, "---\n") {
 		return docFrontmatter{}, content
 	}
