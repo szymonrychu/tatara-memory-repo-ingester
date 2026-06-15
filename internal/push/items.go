@@ -15,7 +15,7 @@ func ItemsFromChunks(repo string, chunks []contract.Chunk) []contract.IngestItem
 		text := ch.Header + "\n---\n" + ch.Body
 		sum := sha256.Sum256([]byte(text))
 		items = append(items, contract.IngestItem{
-			IdempotencyKey: fmt.Sprintf("%s:%s:%s", repo, ch.EntityID, hex.EncodeToString(sum[:8])),
+			IdempotencyKey: fmt.Sprintf("%s:%s:%s", repo, ch.EntityID, hex.EncodeToString(sum[:])),
 			Text:           text,
 			Metadata: map[string]string{
 				"repo": repo, "entity_id": ch.EntityID, "type": ch.Type,

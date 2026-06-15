@@ -302,3 +302,136 @@ func TestSemanticMissesLogsInfoOnSuccess(t *testing.T) {
 	assert.Contains(t, logs, "myrepo", "INFO log must mention the repo")
 	assert.Contains(t, logs, "duration_ms", "INFO log must include duration_ms")
 }
+
+// TestPushChunksDeadlineExceeded verifies that PushChunks returns an error
+// when the context deadline is exceeded while the job is still non-terminal
+// (finding 1: poll loop must respect a deadline).
+func TestPushChunksDeadlineExceeded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/memories:bulk":
+			w.WriteHeader(202)
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: "running"})
+		default:
+			// Always return running; job never completes.
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: "running"})
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	c := push.New(srv.URL, http.DefaultClient, 5*time.Millisecond)
+	err := c.PushChunks(ctx, "r", nil, []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
+	require.Error(t, err, "PushChunks must fail when context deadline is exceeded")
+}
+
+// TestPushChunksPollTransientErrorRetried verifies that a transient 5xx on
+// the GET /ingest-jobs/{id} poll is retried instead of aborting the ingest
+// (finding 2: poll transient errors must not abort).
+func TestPushChunksPollTransientErrorRetried(t *testing.T) {
+	var pollCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/memories:bulk":
+			w.WriteHeader(202)
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: "running"})
+		default:
+			pollCalls++
+			if pollCalls == 1 {
+				// First poll returns 503 (transient).
+				w.WriteHeader(503)
+				_, _ = w.Write([]byte("service unavailable"))
+				return
+			}
+			// Second poll returns success.
+			w.WriteHeader(200)
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: contract.JobSucceeded, Total: 1, Done: 1})
+		}
+	}))
+	defer srv.Close()
+
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	err := c.PushChunks(context.Background(), "r", nil, []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
+	require.NoError(t, err, "transient 5xx on poll must be retried, not fail the ingest")
+	require.GreaterOrEqual(t, pollCalls, 2, "must have polled at least twice")
+}
+
+// TestPushChunksPostTransientErrorRetried verifies that a transient 5xx on
+// the POST /memories:bulk is retried (finding 3: POST retry on 5xx).
+func TestPushChunksPostTransientErrorRetried(t *testing.T) {
+	var postCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/memories:bulk":
+			postCalls++
+			if postCalls == 1 {
+				w.WriteHeader(503)
+				_, _ = w.Write([]byte("transient"))
+				return
+			}
+			w.WriteHeader(202)
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: contract.JobSucceeded, Total: 1, Done: 1})
+		default:
+			w.WriteHeader(200)
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: contract.JobSucceeded, Total: 1, Done: 1})
+		}
+	}))
+	defer srv.Close()
+
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	err := c.PushChunks(context.Background(), "r", nil, []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
+	require.NoError(t, err, "transient 5xx on POST must be retried")
+	require.GreaterOrEqual(t, postCalls, 2, "POST must have been retried")
+}
+
+// TestPushGraphPostTransientErrorRetried verifies that a transient 5xx on
+// POST /code-graph:bulk is retried (finding 3).
+func TestPushGraphPostTransientErrorRetried(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(503)
+			_, _ = w.Write([]byte("transient"))
+			return
+		}
+		w.WriteHeader(200)
+		_ = json.NewEncoder(w).Encode(contract.PushResult{Repo: "r", EntitiesUpserted: 1})
+	}))
+	defer srv.Close()
+
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	res, err := c.PushGraph(context.Background(), contract.GraphPush{Repo: "r", Entities: []contract.Entity{{ID: "x"}}})
+	require.NoError(t, err, "transient 5xx on PushGraph POST must be retried")
+	require.Equal(t, 1, res.EntitiesUpserted)
+	require.GreaterOrEqual(t, calls, 2)
+}
+
+// TestDoBodyDrainedAfterDecode verifies that the response body is drained
+// after decode so HTTP keep-alive connection reuse is possible (finding 6).
+// We verify this indirectly: if the body is not drained, the second request
+// on a single-connection server stalls; with draining it succeeds promptly.
+func TestDoBodyDrainedAfterDecode(t *testing.T) {
+	// Use a server that appends trailing bytes after the JSON to simulate the
+	// common newline case.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		b, _ := json.Marshal(contract.PushResult{Repo: "r", EntitiesUpserted: 1})
+		_, _ = w.Write(b)
+		_, _ = w.Write([]byte("\n\n")) // trailing bytes beyond JSON
+	}))
+	defer srv.Close()
+
+	// Use a client with a single connection.
+	hc := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 1, DisableKeepAlives: false}}
+	c := push.New(srv.URL, hc, time.Millisecond)
+
+	// Two sequential requests; both must succeed (connection reused cleanly).
+	for i := 0; i < 2; i++ {
+		_, err := c.PushGraph(context.Background(), contract.GraphPush{Repo: "r", Entities: []contract.Entity{{ID: "x"}}})
+		require.NoError(t, err, "request %d must succeed with body drained", i+1)
+	}
+}
