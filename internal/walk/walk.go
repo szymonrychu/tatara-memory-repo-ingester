@@ -79,17 +79,20 @@ func parseDiff(repoRoot, out string) (Changes, error) {
 		switch code[0] {
 		case 'A', 'M':
 			if len(fields) < 2 {
+				slog.Warn("parseDiff: short line, skipping", "line", line)
 				continue
 			}
 			p := fields[1]
 			files = append(files, Change{Path: p, Status: rune(code[0]), ContentSHA: contentSHA(repoRoot, p)})
 		case 'D':
 			if len(fields) < 2 {
+				slog.Warn("parseDiff: short line, skipping", "line", line)
 				continue
 			}
 			files = append(files, Change{Path: fields[1], Status: 'D'})
 		case 'R':
 			if len(fields) < 3 {
+				slog.Warn("parseDiff: short line, skipping", "line", line)
 				continue
 			}
 			files = append(files, Change{
@@ -98,10 +101,21 @@ func parseDiff(repoRoot, out string) (Changes, error) {
 			})
 		case 'C':
 			if len(fields) < 3 {
+				slog.Warn("parseDiff: short line, skipping", "line", line)
 				continue
 			}
 			p := fields[2]
 			files = append(files, Change{Path: p, Status: 'A', ContentSHA: contentSHA(repoRoot, p)})
+		case 'T':
+			// Type-change: treat as modification so the new content is re-ingested.
+			if len(fields) < 2 {
+				slog.Warn("parseDiff: short line, skipping", "line", line)
+				continue
+			}
+			p := fields[1]
+			files = append(files, Change{Path: p, Status: 'M', ContentSHA: contentSHA(repoRoot, p)})
+		default:
+			slog.Warn("parseDiff: unrecognized status code, skipping", "code", code, "line", line)
 		}
 	}
 	sortChanges(files)
@@ -109,10 +123,26 @@ func parseDiff(repoRoot, out string) (Changes, error) {
 }
 
 // contentSHA returns the sha256 hex of the working-tree file; empty when unreadable.
+// For symlinks, it hashes the link target text (matching git blob semantics) rather
+// than following the link, preventing reads of files outside the repo root.
 func contentSHA(repoRoot, rel string) string {
-	b, err := os.ReadFile(filepath.Join(repoRoot, rel)) //nolint:gosec
+	full := filepath.Join(repoRoot, rel) //nolint:gosec
+	fi, err := os.Lstat(full)
 	if err != nil {
 		return ""
+	}
+	var b []byte
+	if fi.Mode()&os.ModeSymlink != 0 {
+		target, rerr := os.Readlink(full)
+		if rerr != nil {
+			return ""
+		}
+		b = []byte(target)
+	} else {
+		b, err = os.ReadFile(full) //nolint:gosec
+		if err != nil {
+			return ""
+		}
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
