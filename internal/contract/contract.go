@@ -77,6 +77,7 @@ type GraphPush struct {
 const (
 	ExtractorAST      = "ast"
 	ExtractorSemantic = "semantic"
+	ExtractorSCIP     = "scip"
 )
 
 // FileSHA pairs a repo-relative path with the sha256 of its working-tree content.

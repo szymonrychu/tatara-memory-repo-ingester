@@ -54,7 +54,7 @@ func realMain() error {
 // basename fallback applies when repo-name is still empty after both. Returns
 // errMissingRepoRoot when repo-root is unresolvable.
 func resolveOptions(args []string, getenv func(string) string) (options, error) {
-	o := options{}
+	o := options{getenv: getenv}
 	fs := flag.NewFlagSet("tatara-ingest", flag.ContinueOnError)
 	fs.StringVar(&o.repoRoot, "repo-root", envKey(getenv, "repo-root"), "path to the repository root (required unless --scip is set)")
 	fs.StringVar(&o.repoName, "repo-name", envKey(getenv, "repo-name"), "logical repo name (default: basename of repo-root)")

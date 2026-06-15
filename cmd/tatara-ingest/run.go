@@ -164,6 +164,7 @@ func runSCIP(ctx context.Context, o options, hc *http.Client, m *obs.Metrics) er
 	if err != nil {
 		return err
 	}
+	gp.Extractor = contract.ExtractorSCIP
 	m.SCIPEntitiesTotal.Add(float64(len(gp.Entities)))
 	m.SCIPEdgesTotal.Add(float64(len(gp.Edges)))
 	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval))
@@ -186,6 +187,7 @@ func runSCIP(ctx context.Context, o options, hc *http.Client, m *obs.Metrics) er
 func headCommit(repoRoot string) string {
 	out, err := exec.Command("git", "-C", repoRoot, "rev-parse", "HEAD").Output() //nolint:gosec
 	if err != nil {
+		slog.Warn("headCommit: git rev-parse failed; ingest will have no commit pin", "repoRoot", repoRoot, "error", err)
 		return ""
 	}
 	return strings.TrimSpace(string(out))
@@ -245,6 +247,7 @@ func runSemantic(ctx context.Context, o options, cl *push.Client, commit string,
 
 	// Load miss-file contents and chunk them.
 	var loaded []semantic.LoadedFile
+	var loadedPaths []string
 	fileSHAs := map[string]string{}
 	for _, p := range misses {
 		b, err := os.ReadFile(filepath.Join(o.repoRoot, p)) //nolint:gosec
@@ -253,6 +256,7 @@ func runSemantic(ctx context.Context, o options, cl *push.Client, commit string,
 			continue
 		}
 		loaded = append(loaded, semantic.LoadedFile{Path: p, Content: string(b)})
+		loadedPaths = append(loadedPaths, p)
 		fileSHAs[p] = shaFor(changes, p)
 	}
 	if len(loaded) == 0 {
@@ -297,7 +301,7 @@ func runSemantic(ctx context.Context, o options, cl *push.Client, commit string,
 
 	if _, err := cl.PushGraph(ctx, contract.GraphPush{
 		Repo: o.repoName, Commit: commit, Extractor: contract.ExtractorSemantic,
-		Files:      misses,
+		Files:      loadedPaths,
 		Entities:   aggSem.Entities,
 		Edges:      aggSem.Edges,
 		Hyperedges: aggSem.Hyperedges,

@@ -53,3 +53,27 @@ func TestResolveOptions_ExplicitRepoName(t *testing.T) {
 		t.Errorf("repoName: got %q, want custom", o.repoName)
 	}
 }
+
+// TestResolveOptions_GetenvWired verifies finding 5: resolveOptions must wire
+// its getenv parameter into o.getenv so production code and tests share the same
+// env source rather than leaving o.getenv nil in prod (which hides the source).
+func TestResolveOptions_GetenvWired(t *testing.T) {
+	called := false
+	sentinel := func(key string) string {
+		called = true
+		return map[string]string{"REPO_ROOT": "/some/path"}[key]
+	}
+	o, err := resolveOptions([]string{}, sentinel)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if o.getenv == nil {
+		t.Fatal("o.getenv must be wired from resolveOptions; was nil in production (finding 5)")
+	}
+	// Call it and verify it delegates to the injected function.
+	_ = called // sentinel was called during flag parsing via envKey
+	got := o.getenv("REPO_ROOT")
+	if got != "/some/path" {
+		t.Errorf("o.getenv(REPO_ROOT) = %q, want /some/path", got)
+	}
+}
