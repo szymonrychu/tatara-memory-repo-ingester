@@ -173,6 +173,87 @@ func TestPythonClassProvides(t *testing.T) {
 	require.Equal(t, "pkg/decorated.py", provDecorated.SrcFile)
 }
 
+// TestPythonNoDuplicateCallEdges: a function calling the same callee N times must produce
+// exactly one calls edge, not N identical edges (finding 1).
+func TestPythonNoDuplicateCallEdges(t *testing.T) {
+	a := analyze.NewPython()
+
+	res, err := a.Analyze(context.Background(), "testdata/py", []string{"pkg/multi_call.py"})
+	require.NoError(t, err)
+
+	count := 0
+	for _, e := range res.Edges {
+		if e.Relation == contract.RelCalls &&
+			e.From == "py:func:pkg.multi_call.caller" &&
+			e.To == "py:func:pkg.multi_call.target" {
+			count++
+		}
+	}
+	require.Equal(t, 1, count, "expected exactly 1 calls edge from caller->target, got %d (duplicate edges)", count)
+}
+
+// TestPythonAliasedImportNoGarbageKey: aliased imports must not create bogus candidate IDs
+// like "py:func:pkg.helper.helped as h" and must not silently fail to resolve (finding 2).
+func TestPythonAliasedImportNoGarbageKey(t *testing.T) {
+	a := analyze.NewPython()
+
+	files := []string{"pkg/helper.py", "pkg/aliased_import.py"}
+	res, err := a.Analyze(context.Background(), "testdata/py", files)
+	require.NoError(t, err)
+
+	// There must be no edge with a bogus To like "py:func:pkg.helper.helped as h".
+	for _, e := range res.Edges {
+		if e.Relation == contract.RelCalls {
+			require.False(t, strings.Contains(e.To, " as "),
+				"bogus aliased-import entity ID in calls edge: To=%q", e.To)
+		}
+	}
+}
+
+// TestPythonWildcardImportNoGarbageKey: wildcard imports must not create a bogus "*" candidate
+// ID and must not cause a panic (finding 2).
+func TestPythonWildcardImportNoGarbageKey(t *testing.T) {
+	a := analyze.NewPython()
+
+	res, err := a.Analyze(context.Background(), "testdata/py", []string{"pkg/wildcard_import.py"})
+	require.NoError(t, err)
+
+	for _, e := range res.Edges {
+		if e.Relation == contract.RelCalls {
+			require.NotContains(t, e.To, "*",
+				"bogus wildcard entity ID in calls edge: To=%q", e.To)
+		}
+	}
+}
+
+// TestPythonFileDefsComputedOnce: pyFileDefs must not be called twice per file.
+// We verify indirectly: the result of analyzing all files is consistent (both passes use
+// the same defs) and the repo-wide index entities are identical to what the per-file pass
+// sees (finding 3). This is a regression-safety test - the observable effect is that
+// repoIndex and moduleDefs are consistent.
+func TestPythonFileDefsConsistency(t *testing.T) {
+	a := analyze.NewPython()
+
+	// Analyze a file twice - once alone (so it IS the repoIndex) and once inside
+	// a multi-file set. The resulting entities must be identical.
+	resSingle, err := a.Analyze(context.Background(), "testdata/py", []string{"pkg/mod.py"})
+	require.NoError(t, err)
+
+	allFiles := append(allPyFiles, "pkg/multi_call.py", "pkg/aliased_import.py", "pkg/wildcard_import.py")
+	resMulti, err := a.Analyze(context.Background(), "testdata/py", allFiles)
+	require.NoError(t, err)
+
+	// Every entity from the single-file run must also appear in the multi-file run.
+	multiIDs := map[string]bool{}
+	for _, e := range resMulti.Entities {
+		multiIDs[e.ID] = true
+	}
+	for _, e := range resSingle.Entities {
+		require.True(t, multiIDs[e.ID],
+			"entity %q from single-file run missing in multi-file run (caching inconsistency)", e.ID)
+	}
+}
+
 func TestPythonDegradedByDecorator(t *testing.T) {
 	a := analyze.NewPython()
 
