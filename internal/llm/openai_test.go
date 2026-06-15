@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -88,6 +89,67 @@ func TestCompleteDoesNotRetryOn400(t *testing.T) {
 	_, err := c.Complete(context.Background(), "x")
 	require.Error(t, err)
 	require.Equal(t, int32(1), atomic.LoadInt32(&calls), "4xx (non-429) must not retry")
+}
+
+func TestCompleteRespectsRetryAfterHeader(t *testing.T) {
+	var calls int32
+	var receivedDelay time.Duration
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(429)
+			_, _ = w.Write([]byte(`{"error":"rate limited"}`))
+			return
+		}
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"ok\":1}"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := New(Config{APIKey: "k", Model: "m", BaseURL: srv.URL}, http.DefaultClient)
+
+	start := time.Now()
+	out, err := c.Complete(context.Background(), "x")
+	receivedDelay = time.Since(start)
+
+	require.NoError(t, err)
+	require.Equal(t, `{"ok":1}`, out)
+	require.Equal(t, int32(2), atomic.LoadInt32(&calls))
+	// Retry-After: 2 seconds must be honoured; allow 200ms tolerance for slow CI
+	require.GreaterOrEqual(t, receivedDelay, 2*time.Second, "retry delay must respect Retry-After header")
+}
+
+func TestCompleteRetryAfterHTTPDate(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			// HTTP-date 2 seconds in the future
+			future := time.Now().Add(2 * time.Second).UTC().Format(http.TimeFormat)
+			w.Header().Set("Retry-After", future)
+			w.WriteHeader(429)
+			_, _ = w.Write([]byte(`{"error":"rate limited"}`))
+			return
+		}
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"ok\":2}"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := New(Config{APIKey: "k", Model: "m", BaseURL: srv.URL}, http.DefaultClient)
+
+	start := time.Now()
+	out, err := c.Complete(context.Background(), "x")
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	require.Equal(t, `{"ok":2}`, out)
+	require.Equal(t, int32(2), atomic.LoadInt32(&calls))
+	// Allow generous lower bound: the server sets Retry-After 2s in the future
+	// at request-receive time; by the time we measure elapsed includes round-
+	// trips, so 1s is enough to prove we waited meaningfully vs the 500ms default.
+	require.GreaterOrEqual(t, elapsed, 1*time.Second, "HTTP-date Retry-After must be honoured")
 }
 
 func TestConfigFromEnvDefaults(t *testing.T) {

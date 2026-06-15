@@ -9,12 +9,45 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// retryDelay is the backoff between attempts; overridable in tests.
+// retryDelay is the default backoff between attempts when no Retry-After is
+// present; overridable in tests.
 var retryDelay = 500 * time.Millisecond
+
+// maxRetryDelay caps the Retry-After value so one bad gateway cannot stall the
+// pipeline indefinitely.
+const maxRetryDelay = 60 * time.Second
+
+// parseRetryAfter returns the delay from a Retry-After header value. It
+// handles both the integer-seconds form ("30") and the HTTP-date form
+// ("Mon, 02 Jan 2006 15:04:05 GMT"). Returns 0 when the header is absent or
+// unparseable.
+func parseRetryAfter(header string) time.Duration {
+	if header == "" {
+		return 0
+	}
+	// Try integer seconds first.
+	if secs, err := strconv.ParseFloat(strings.TrimSpace(header), 64); err == nil {
+		d := time.Duration(secs * float64(time.Second))
+		if d < 0 {
+			return 0
+		}
+		return d
+	}
+	// Try HTTP-date.
+	if t, err := http.ParseTime(header); err == nil {
+		d := time.Until(t)
+		if d < 0 {
+			return 0
+		}
+		return d
+	}
+	return 0
+}
 
 // Config holds the OpenAI client configuration.
 type Config struct {
@@ -73,7 +106,7 @@ type chatResponse struct {
 }
 
 // Complete sends a single user prompt in JSON mode and returns the message
-// content. It retries once on 429/5xx with a short backoff.
+// content. It retries once on 429/5xx, honouring Retry-After when present.
 func (c *Client) Complete(ctx context.Context, prompt string) (string, error) {
 	reqBody := chatRequest{
 		Model:          c.cfg.Model,
@@ -87,15 +120,16 @@ func (c *Client) Complete(ctx context.Context, prompt string) (string, error) {
 	}
 
 	var lastErr error
+	nextDelay := retryDelay
 	for attempt := 0; attempt < 2; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
 				return "", ctx.Err()
-			case <-time.After(retryDelay):
+			case <-time.After(nextDelay):
 			}
 		}
-		content, retry, err := c.try(ctx, b)
+		content, retry, wait, err := c.try(ctx, b)
 		if err == nil {
 			return content, nil
 		}
@@ -103,37 +137,47 @@ func (c *Client) Complete(ctx context.Context, prompt string) (string, error) {
 		if !retry {
 			return "", err
 		}
+		// Use server-supplied Retry-After when present, capped to maxRetryDelay.
+		if wait > 0 {
+			if wait > maxRetryDelay {
+				wait = maxRetryDelay
+			}
+			nextDelay = wait
+		}
 	}
 	return "", lastErr
 }
 
-// try performs one request. retry is true only for transient (429/5xx) failures.
-func (c *Client) try(ctx context.Context, body []byte) (content string, retry bool, err error) {
+// try performs one request. retry is true only for transient (429/5xx)
+// failures. wait is the Retry-After duration parsed from the response (0 when
+// absent or on success).
+func (c *Client) try(ctx context.Context, body []byte) (content string, retry bool, wait time.Duration, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return "", false, fmt.Errorf("request: %w", err)
+		return "", false, 0, fmt.Errorf("request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", true, fmt.Errorf("call openai: %w", err)
+		return "", true, 0, fmt.Errorf("call openai: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		transient := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
-		return "", transient, fmt.Errorf("openai status %d: %s", resp.StatusCode, string(b))
+		wait = parseRetryAfter(resp.Header.Get("Retry-After"))
+		return "", transient, wait, fmt.Errorf("openai status %d: %s", resp.StatusCode, string(b))
 	}
 
 	var cr chatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
-		return "", false, fmt.Errorf("decode openai response: %w", err)
+		return "", false, 0, fmt.Errorf("decode openai response: %w", err)
 	}
 	if len(cr.Choices) == 0 {
-		return "", false, fmt.Errorf("openai response has no choices")
+		return "", false, 0, fmt.Errorf("openai response has no choices")
 	}
-	return cr.Choices[0].Message.Content, false, nil
+	return cr.Choices[0].Message.Content, false, 0, nil
 }
