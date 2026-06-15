@@ -393,9 +393,16 @@ func occEndLine(r []int32) (int32, bool) {
 	}
 }
 
-// occLineStartEnd returns 1-based LineStart and 0-based LineEnd from a SCIP
-// occurrence Range. SCIP lines are 0-based; we convert start to 1-based to
-// match the contract's convention (AST analyzers also emit 1-based LineStart).
+// occLineStartEnd returns LineStart and LineEnd for an entity from a SCIP
+// range. SCIP lines are 0-based; LineStart is converted to 1-based to match the
+// contract convention (AST analyzers also emit 1-based LineStart).
+//
+// The end line is computed differently per range kind so it is never less than
+// LineStart: for an EnclosingRange the 0-based exclusive end already equals the
+// 1-based inclusive last line, but for a single-token name Range (the fallback
+// when no EnclosingRange exists) the inclusive 0-based end would yield
+// LineEnd == LineStart-1; we clamp LineEnd to at least LineStart so a
+// single-line entity reports LineStart == LineEnd rather than an inverted span.
 // Returns (0, 0) when the range is malformed.
 func occLineStartEnd(r []int32) (lineStart, lineEnd int) {
 	start, ok1 := occStartLine(r)
@@ -403,5 +410,10 @@ func occLineStartEnd(r []int32) (lineStart, lineEnd int) {
 	if !ok1 || !ok2 {
 		return 0, 0
 	}
-	return int(start) + 1, int(end)
+	lineStart = int(start) + 1
+	lineEnd = int(end)
+	if lineEnd < lineStart {
+		lineEnd = lineStart
+	}
+	return lineStart, lineEnd
 }

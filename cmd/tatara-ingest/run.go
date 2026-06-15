@@ -38,12 +38,24 @@ type options struct {
 	crossRepoPrefix string
 	scipPath        string
 	scipRepo        string
+	metricsPushURL  string
 	getenv          func(string) string
 }
 
 func run(ctx context.Context, o options, hc *http.Client) error {
 	m := obs.New()
 	m.IngestRunsTotal.Inc()
+
+	// Short-lived Jobs cannot be scraped; push gathered metrics at job end.
+	// Best-effort: a push failure is logged and never fails the ingest. Deferred
+	// so it fires on every return path (SCIP, normal, and error exits).
+	if o.metricsPushURL != "" {
+		defer func() {
+			if err := m.Push(ctx, o.metricsPushURL, hc); err != nil {
+				slog.Warn("metrics push failed", "url", o.metricsPushURL, "error", err)
+			}
+		}()
+	}
 
 	if o.scipPath != "" {
 		return runSCIP(ctx, o, hc, m)

@@ -501,6 +501,40 @@ func TestLineStartEndFromEnclosingRange(t *testing.T) {
 	assert.Equal(t, 12, e.LineEnd, "LineEnd should come from EnclosingRange end")
 }
 
+// TestLineEndNotInvertedForNameTokenRange verifies that a definition with no
+// EnclosingRange (only a single-line name-token Range) reports LineEnd >=
+// LineStart rather than an inverted span (LineEnd == LineStart-1).
+func TestLineEndNotInvertedForNameTokenRange(t *testing.T) {
+	const sym = "go 1.0 `main`/NoBody()."
+	idx := &scipbindings.Index{
+		Documents: []*scipbindings.Document{
+			{
+				RelativePath: "nobody.go",
+				Language:     "go",
+				Symbols: []*scipbindings.SymbolInformation{
+					{Symbol: sym, Kind: scipbindings.SymbolInformation_Function, DisplayName: "NoBody"},
+				},
+				Occurrences: []*scipbindings.Occurrence{
+					{
+						// Name token only on 0-based line 5; no EnclosingRange.
+						Range:       []int32{5, 5, 5, 11},
+						Symbol:      sym,
+						SymbolRoles: int32(scipbindings.SymbolRole_Definition),
+					},
+				},
+			},
+		},
+	}
+
+	gp, err := scip.Parse(writeIndex(t, idx), "repo")
+	require.NoError(t, err)
+	require.Len(t, gp.Entities, 1)
+	e := gp.Entities[0]
+	assert.Equal(t, 6, e.LineStart, "LineStart should be name-token start+1")
+	assert.GreaterOrEqual(t, e.LineEnd, e.LineStart, "LineEnd must not be before LineStart")
+	assert.Equal(t, 6, e.LineEnd, "single-line def should report LineEnd == LineStart")
+}
+
 // TestLastComponentParsesDescriptors verifies finding 8: lastComponent must
 // return the descriptor name from ParseSymbol, not a hand-trimmed suffix.
 // For a method like "scip-go go pkg 1.0 T#m()." the name is "m", not "T#m".

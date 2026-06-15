@@ -1,6 +1,7 @@
 package obs_test
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -50,7 +51,7 @@ func TestPushSendsTextMetrics(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := m.Push(srv.URL, http.DefaultClient)
+	err := m.Push(context.Background(), srv.URL, http.DefaultClient)
 	require.NoError(t, err)
 
 	assert.Contains(t, received, "ingest_runs_total", "text output must contain ingest_runs_total")
@@ -69,7 +70,7 @@ func TestPushReturnsErrorOnNon2xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := m.Push(srv.URL, http.DefaultClient)
+	err := m.Push(context.Background(), srv.URL, http.DefaultClient)
 	require.Error(t, err)
 	assert.True(t, strings.Contains(err.Error(), "500"), "error should mention status 500")
 }

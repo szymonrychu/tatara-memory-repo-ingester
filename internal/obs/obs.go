@@ -6,8 +6,10 @@ package obs
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/expfmt"
@@ -113,11 +115,15 @@ func New() *Metrics {
 	return m
 }
 
+// pushTimeout caps how long a metrics push may block at job teardown so a hung
+// receiver cannot delay the Job pod's exit.
+const pushTimeout = 10 * time.Second
+
 // Push gathers all metrics and HTTP POSTs the text format to pushURL.
 // pushURL is the operator's pushmetrics receiver, e.g.
 // http://tatara-operator/pushmetrics/ingest/<runID>.
 // Errors are returned so callers can log them; they must not fail the ingest.
-func (m *Metrics) Push(pushURL string, hc *http.Client) error {
+func (m *Metrics) Push(ctx context.Context, pushURL string, hc *http.Client) error {
 	gathered, err := m.reg.Gather()
 	if err != nil {
 		return fmt.Errorf("obs: gather: %w", err)
@@ -132,7 +138,9 @@ func (m *Metrics) Push(pushURL string, hc *http.Client) error {
 	if buf.Len() == 0 {
 		return nil
 	}
-	req, err := http.NewRequest(http.MethodPost, pushURL, &buf) //nolint:noctx
+	ctx, cancel := context.WithTimeout(ctx, pushTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, pushURL, &buf)
 	if err != nil {
 		return fmt.Errorf("obs: push request: %w", err)
 	}

@@ -688,6 +688,47 @@ func TestRunSemanticUnreadableMissFileExcludedFromPush(t *testing.T) {
 		"unreadable miss file must NOT be in semantic push Files (would cause server-side purge with no replacement)")
 }
 
+// TestRunPushesMetricsWhenURLSet verifies the obs metrics scaffold is actually
+// wired: when metricsPushURL is set, run() POSTs the gathered Prometheus text
+// (including ingest_runs_total) to that URL at job end.
+func TestRunPushesMetricsWhenURLSet(t *testing.T) {
+	dir := t.TempDir()
+	for _, a := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
+		c := exec.Command("git", a...)
+		c.Dir = dir
+		require.NoError(t, c.Run())
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "doc.md"), []byte("# Doc\n\nbody\n"), 0o644))
+	commitAll(t, dir, "init")
+
+	var metricsBody atomic.Value
+	metricsBody.Store("")
+	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		metricsBody.Store(string(b))
+		w.WriteHeader(200)
+	}))
+	defer metrics.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph:bulk":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		default:
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, metricsPushURL: metrics.URL}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+
+	got := metricsBody.Load().(string)
+	require.Contains(t, got, "ingest_runs_total", "metrics push must carry the gathered Prometheus text")
+}
+
 // newGitRepo creates an initialized git repo in a temp dir.
 func newGitRepo(t *testing.T) string {
 	t.Helper()
