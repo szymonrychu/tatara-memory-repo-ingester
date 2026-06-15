@@ -131,6 +131,8 @@ func jsFileDefs(relPath string, root *sitter.Node, src []byte) map[string]string
 					n := nameNode.Content(src)
 					defs[n] = classID(relPath, n)
 				}
+			case "lexical_declaration", "variable_declaration":
+				jsCollectArrowDefs(inner, relPath, src, defs)
 			}
 		case "class_declaration":
 			if nameNode := child.ChildByFieldName("name"); nameNode != nil {
@@ -353,35 +355,6 @@ func resolveModulePath(fileDir, specifier string) string {
 	return joined
 }
 
-// jsExternalImports returns specifiers from import statements that do not resolve
-// to an in-repo module (bare specifiers not starting with ".").
-func jsExternalImports(root *sitter.Node, src []byte, moduleSet map[string]bool) []string {
-	seen := map[string]bool{}
-	var result []string
-	count := int(root.ChildCount())
-	for i := 0; i < count; i++ {
-		child := root.Child(i)
-		if child == nil || child.Type() != "import_statement" {
-			continue
-		}
-		srcNode := child.ChildByFieldName("source")
-		if srcNode == nil {
-			continue
-		}
-		specifier := jsStringValue(srcNode, src)
-		// Bare specifier (not relative) and not in moduleSet -> external.
-		if strings.HasPrefix(specifier, ".") {
-			continue
-		}
-		if seen[specifier] {
-			continue
-		}
-		seen[specifier] = true
-		result = append(result, specifier)
-	}
-	return result
-}
-
 // processFile emits all entities, edges, and chunks for one JavaScript file.
 func (j jsAnalyzer) processFile(
 	relPath string,
@@ -410,18 +383,6 @@ func (j jsAnalyzer) processFile(
 		Body:     string(src),
 	})
 
-	// Emit requires SymbolRows for unresolved external imports.
-	for _, specifier := range jsExternalImports(root, src, moduleSet) {
-		res.Symbols = append(res.Symbols, contract.SymbolRow{
-			Symbol:   specifier,
-			Lang:     "javascript",
-			Kind:     "module",
-			Role:     contract.RoleRequires,
-			EntityID: modID,
-			SrcFile:  relPath,
-		})
-	}
-
 	// Emit require()-based import edges: importMap values that are js:module: IDs
 	// came from CommonJS require() bindings resolved by jsCollectRequireImports.
 	emittedImports := map[string]bool{}
@@ -437,8 +398,10 @@ func (j jsAnalyzer) processFile(
 		}
 	}
 
-	// Emit import edges from import_statement nodes.
+	// Single pass over top-level nodes: emit import edges and requires SymbolRows
+	// for external specifiers inline, avoiding a second walk via jsExternalImports.
 	fileDir := filepath.Dir(relPath)
+	seenExternal := map[string]bool{}
 	count := int(root.ChildCount())
 	for i := 0; i < count; i++ {
 		child := root.Child(i)
@@ -458,6 +421,17 @@ func (j jsAnalyzer) processFile(
 					From:     modID,
 					To:       moduleID(resolved),
 					Relation: contract.RelImports,
+					SrcFile:  relPath,
+				})
+			} else if !seenExternal[rawSource] {
+				// Bare specifier not in-repo -> requires SymbolRow.
+				seenExternal[rawSource] = true
+				res.Symbols = append(res.Symbols, contract.SymbolRow{
+					Symbol:   rawSource,
+					Lang:     "javascript",
+					Kind:     "module",
+					Role:     contract.RoleRequires,
+					EntityID: modID,
 					SrcFile:  relPath,
 				})
 			}
@@ -507,6 +481,36 @@ func (j jsAnalyzer) processFile(
 					EntityID: classID(relPath, name),
 					SrcFile:  relPath,
 				})
+			case "lexical_declaration", "variable_declaration":
+				// export const handler = () => {}  or  export const helper = function() {}
+				nc := int(inner.NamedChildCount())
+				for di := 0; di < nc; di++ {
+					decl := inner.NamedChild(di)
+					if decl == nil || decl.Type() != "variable_declarator" {
+						continue
+					}
+					valNode := decl.ChildByFieldName("value")
+					if valNode == nil {
+						continue
+					}
+					if valNode.Type() != "arrow_function" && valNode.Type() != "function_expression" {
+						continue
+					}
+					nameNode := decl.ChildByFieldName("name")
+					if nameNode == nil {
+						continue
+					}
+					name := nameNode.Content(src)
+					j.emitFunc(relPath, name, false, src, valNode, moduleDefs, importMap, repoIndex, modID, res)
+					res.Symbols = append(res.Symbols, contract.SymbolRow{
+						Symbol:   relPath + "::" + name,
+						Lang:     "javascript",
+						Kind:     "func",
+						Role:     contract.RoleProvides,
+						EntityID: funcID(relPath, name),
+						SrcFile:  relPath,
+					})
+				}
 			}
 
 		case "class_declaration":
@@ -626,6 +630,7 @@ func (j jsAnalyzer) emitFunc(
 
 	danglingCalls := []string{}
 	degradedReasons := []string{}
+	seenEdge := map[string]bool{}
 
 	jsWalkCalls(bodyNode, src, func(callNode *sitter.Node, callee *sitter.Node) {
 		// Detect dynamic/computed calls: subscript_expression (obj[expr]()) or
@@ -647,6 +652,11 @@ func (j jsAnalyzer) emitFunc(
 
 		// Tier 1: scoped_name_match - defined in this module.
 		if calleeID, ok := moduleDefs[calleeName]; ok {
+			edgeKey := fid + "->" + calleeID
+			if seenEdge[edgeKey] {
+				return
+			}
+			seenEdge[edgeKey] = true
 			props := map[string]string{
 				"resolution": contract.ResScopedNameMatch,
 				"confidence": contract.ConfidenceFor(contract.ResScopedNameMatch),
@@ -663,6 +673,11 @@ func (j jsAnalyzer) emitFunc(
 
 		// Tier 2: imported_name_match - resolves via tracked import.
 		if calleeID, ok := importMap[calleeName]; ok {
+			edgeKey := fid + "->" + calleeID
+			if seenEdge[edgeKey] {
+				return
+			}
+			seenEdge[edgeKey] = true
 			props := map[string]string{
 				"resolution": contract.ResImportedNameMatch,
 				"confidence": contract.ConfidenceFor(contract.ResImportedNameMatch),
@@ -683,19 +698,28 @@ func (j jsAnalyzer) emitFunc(
 		case 0:
 			danglingCalls = append(danglingCalls, calleeName)
 		case 1:
-			props := map[string]string{
-				"resolution": contract.ResGlobalNameMatch,
-				"confidence": contract.ConfidenceFor(contract.ResGlobalNameMatch),
+			edgeKey := fid + "->" + ids[0]
+			if !seenEdge[edgeKey] {
+				seenEdge[edgeKey] = true
+				props := map[string]string{
+					"resolution": contract.ResGlobalNameMatch,
+					"confidence": contract.ConfidenceFor(contract.ResGlobalNameMatch),
+				}
+				res.Edges = append(res.Edges, contract.Edge{
+					From:       fid,
+					To:         ids[0],
+					Relation:   contract.RelCalls,
+					SrcFile:    relPath,
+					Properties: props,
+				})
 			}
-			res.Edges = append(res.Edges, contract.Edge{
-				From:       fid,
-				To:         ids[0],
-				Relation:   contract.RelCalls,
-				SrcFile:    relPath,
-				Properties: props,
-			})
 		default:
 			for _, id := range ids {
+				edgeKey := fid + "->" + id
+				if seenEdge[edgeKey] {
+					continue
+				}
+				seenEdge[edgeKey] = true
 				props := map[string]string{
 					"resolution": contract.ResAmbiguousMultiDef,
 					"confidence": contract.ConfidenceFor(contract.ResAmbiguousMultiDef),

@@ -200,6 +200,64 @@ func TestJavaScriptAnalyzer_ClassProvides(t *testing.T) {
 	require.Equal(t, "src/export_class.js", prov.SrcFile)
 }
 
+// TestJavaScriptAnalyzer_ExportedArrowFunc: export const x = () => {} emits entity, defines edge,
+// provides SymbolRow, and preserves calls inside the body.
+func TestJavaScriptAnalyzer_ExportedArrowFunc(t *testing.T) {
+	a := analyze.NewJavaScript()
+
+	res, err := a.Analyze(context.Background(), "testdata/js", []string{"src/export_arrow.js"})
+	require.NoError(t, err)
+
+	// Both exported arrow/function-expression bindings must yield js:func entities.
+	ids := map[string]bool{}
+	for _, e := range res.Entities {
+		ids[e.ID] = true
+	}
+	require.True(t, ids["js:func:src/export_arrow.js::handler"], "expected entity for exported arrow 'handler'")
+	require.True(t, ids["js:func:src/export_arrow.js::helper"], "expected entity for exported function expr 'helper'")
+
+	// defines edges from module to each exported func.
+	_, defHandler := findEdge(res.Edges, contract.RelDefines, "js:module:src/export_arrow.js", "js:func:src/export_arrow.js::handler")
+	require.True(t, defHandler, "expected module->handler defines edge")
+	_, defHelper := findEdge(res.Edges, contract.RelDefines, "js:module:src/export_arrow.js", "js:func:src/export_arrow.js::helper")
+	require.True(t, defHelper, "expected module->helper defines edge")
+
+	// provides SymbolRows for the exported bindings.
+	pHandler, okHandler := findSymbol(res.Symbols, contract.RoleProvides, "src/export_arrow.js::handler")
+	require.True(t, okHandler, "expected provides SymbolRow for 'handler'")
+	require.Equal(t, "func", pHandler.Kind)
+	require.Equal(t, "js:func:src/export_arrow.js::handler", pHandler.EntityID)
+
+	pHelper, okHelper := findSymbol(res.Symbols, contract.RoleProvides, "src/export_arrow.js::helper")
+	require.True(t, okHelper, "expected provides SymbolRow for 'helper'")
+	require.Equal(t, "func", pHelper.Kind)
+	require.Equal(t, "js:func:src/export_arrow.js::helper", pHelper.EntityID)
+
+	// calls edge: handler -> inner (scoped).
+	callEdge, okCall := findEdge(res.Edges, contract.RelCalls, "js:func:src/export_arrow.js::handler", "js:func:src/export_arrow.js::inner")
+	require.True(t, okCall, "expected handler->inner calls edge")
+	require.Equal(t, contract.ResScopedNameMatch, callEdge.Properties["resolution"])
+}
+
+// TestJavaScriptAnalyzer_NoDuplicateCallEdges: a function calling the same callee N times
+// must produce exactly one calls edge, not N.
+func TestJavaScriptAnalyzer_NoDuplicateCallEdges(t *testing.T) {
+	a := analyze.NewJavaScript()
+
+	res, err := a.Analyze(context.Background(), "testdata/js", []string{"src/dup_calls.js"})
+	require.NoError(t, err)
+
+	count := 0
+	for _, e := range res.Edges {
+		if e.Relation == contract.RelCalls &&
+			e.From == "js:func:src/dup_calls.js::caller" &&
+			e.To == "js:func:src/dup_calls.js::target" {
+			count++
+		}
+	}
+	require.Equal(t, 1, count, "expected exactly 1 calls edge from caller->target, got %d", count)
+}
+
 // TestJavaScriptAnalyzer_Unresolved: a call to a plain undefined identifier produces no calls edge
 // and leaves a dangling_call property on the caller.
 func TestJavaScriptAnalyzer_Unresolved(t *testing.T) {
