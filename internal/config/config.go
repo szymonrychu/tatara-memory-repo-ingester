@@ -17,6 +17,7 @@ type Config struct {
 	PollInterval     time.Duration
 	HTTPTimeout      time.Duration
 	CrossRepoPrefix  string
+	MetricsPushURL   string
 }
 
 // Load builds a Config from a key lookup function (kebab-case keys).
@@ -34,6 +35,7 @@ func Load(getenv func(string) string) (Config, error) {
 		PollInterval:     2 * time.Second,
 		HTTPTimeout:      60 * time.Second,
 		CrossRepoPrefix:  crossRepoPrefix,
+		MetricsPushURL:   strings.TrimRight(getenv("metrics-push-url"), "/"),
 	}
 	if v := getenv("poll-interval"); v != "" {
 		d, err := time.ParseDuration(v)

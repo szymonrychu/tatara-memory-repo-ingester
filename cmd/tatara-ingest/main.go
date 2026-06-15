@@ -17,7 +17,7 @@ import (
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if err := realMain(); err != nil {
 		slog.Error("ingest failed", "error", err)
 		os.Exit(1)
@@ -38,6 +38,7 @@ func realMain() error {
 	}
 	o.pollInterval = cfg.PollInterval
 	o.crossRepoPrefix = cfg.CrossRepoPrefix
+	o.metricsPushURL = cfg.MetricsPushURL
 
 	ctx := context.Background()
 	hc := http.DefaultClient
@@ -54,7 +55,7 @@ func realMain() error {
 // basename fallback applies when repo-name is still empty after both. Returns
 // errMissingRepoRoot when repo-root is unresolvable.
 func resolveOptions(args []string, getenv func(string) string) (options, error) {
-	o := options{}
+	o := options{getenv: getenv}
 	fs := flag.NewFlagSet("tatara-ingest", flag.ContinueOnError)
 	fs.StringVar(&o.repoRoot, "repo-root", envKey(getenv, "repo-root"), "path to the repository root (required unless --scip is set)")
 	fs.StringVar(&o.repoName, "repo-name", envKey(getenv, "repo-name"), "logical repo name (default: basename of repo-root)")

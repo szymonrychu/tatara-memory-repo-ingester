@@ -1,9 +1,14 @@
 package analyze_test
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/analyze"
@@ -36,6 +41,46 @@ func TestDocsAnalyzerNoFrontmatter(t *testing.T) {
 	require.Empty(t, e.Author)
 	require.Empty(t, e.CapturedAt)
 	require.Contains(t, res.Chunks[0].Body, "Some prose.")
+}
+
+// TestDocsAnalyzerWarnsOnUnreadableFile verifies that an unreadable file path
+// produces a WARN log entry (rule 12) and does not cause an error or panic.
+// Before the fix, a missing file was silently skipped (bare continue, no log).
+func TestDocsAnalyzerWarnsOnUnreadableFile(t *testing.T) {
+	var logBuf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	a := analyze.NewDocs()
+	// "no_such_file.md" does not exist in testdata/docs.
+	res, err := a.Analyze(context.Background(), "testdata/docs", []string{"no_such_file.md"})
+	require.NoError(t, err, "unreadable file must not fail the run")
+	require.Empty(t, res.Entities, "unreadable file must not produce entities")
+
+	assert.Contains(t, logBuf.String(), "no_such_file.md", "WARN log must mention the skipped path")
+}
+
+// TestDocsAnalyzerCRLFFrontmatter verifies that a markdown file with Windows
+// CRLF line endings still has its frontmatter parsed and stripped from the body.
+// Before the fix, "---\r\n" did not match the LF-only prefix so frontmatter
+// was treated as body and provenance fields were lost.
+func TestDocsAnalyzerCRLFFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	content := "---\r\nsource_url: https://crlf.example.com\r\nauthor: Bob\r\ncaptured_at: 2026-06-15T00:00:00Z\r\n---\r\nHello from Windows.\r\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "crlf.md"), []byte(content), 0o644))
+
+	a := analyze.NewDocs()
+	res, err := a.Analyze(context.Background(), dir, []string{"crlf.md"})
+	require.NoError(t, err)
+	require.Len(t, res.Entities, 1)
+	e := res.Entities[0]
+	assert.Equal(t, "https://crlf.example.com", e.SourceURL, "source_url must be parsed from CRLF frontmatter")
+	assert.Equal(t, "Bob", e.Author, "author must be parsed from CRLF frontmatter")
+	assert.Equal(t, "2026-06-15T00:00:00Z", e.CapturedAt, "captured_at must be parsed from CRLF frontmatter")
+	require.Len(t, res.Chunks, 1)
+	assert.NotContains(t, res.Chunks[0].Body, "source_url", "frontmatter must be stripped from body")
+	assert.Contains(t, res.Chunks[0].Body, "Hello from Windows.")
 }
 
 func TestDocsAnalyzer(t *testing.T) {

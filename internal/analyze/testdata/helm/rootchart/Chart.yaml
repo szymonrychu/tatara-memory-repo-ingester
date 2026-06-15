@@ -1,0 +1,7 @@
+apiVersion: v2
+name: rootchart
+version: 0.1.0
+dependencies:
+  - name: common
+    version: "1.0.0"
+    repository: https://charts.bitnami.com/bitnami

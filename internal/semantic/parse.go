@@ -1,6 +1,7 @@
 package semantic
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -80,27 +81,44 @@ func ParseFragment(repo string, body []byte) (analyze.Result, error) {
 		return id
 	}
 	for _, e := range f.Edges {
+		from := remapID(e.Source)
+		to := remapID(e.Target)
+		// Drop edges with empty or self endpoints; they reference non-existent entities.
+		if from == "" || to == "" || from == to {
+			continue
+		}
 		res.Edges = append(res.Edges, contract.Edge{
-			From:            remapID(e.Source),
-			To:              remapID(e.Target),
+			From:            from,
+			To:              to,
 			Relation:        e.Relation,
 			SrcFile:         e.SourceFile,
 			ConfidenceScore: e.ConfidenceScore,
 			ConfidenceTier:  contract.TierForScore(e.ConfidenceScore),
 		})
 	}
-	for i, h := range f.Hyperedges {
-		if i >= maxHyperedgesPerChunk {
+	emitted := 0
+	for _, h := range f.Hyperedges {
+		if emitted >= maxHyperedgesPerChunk {
 			break
 		}
+		// Contract requires 3+ members; skip under-populated hyperedges.
+		if len(h.Nodes) < 3 {
+			continue
+		}
+		// Remap members through the concept-id table, mirroring edge endpoint remapping.
+		members := make([]string, len(h.Nodes))
+		for j, m := range h.Nodes {
+			members[j] = remapID(m)
+		}
 		res.Hyperedges = append(res.Hyperedges, contract.Hyperedge{
-			ID:              fmt.Sprintf("he:%s:%s:%s", repo, h.SourceFile, h.ID),
+			ID:              hyperedgeID(repo, h.SourceFile, h.ID, h.Label, members),
 			Label:           h.Label,
 			Relation:        h.Relation,
 			ConfidenceScore: h.ConfidenceScore,
 			SrcFile:         h.SourceFile,
-			Members:         h.Nodes,
+			Members:         members,
 		})
+		emitted++
 	}
 	return res, nil
 }
@@ -144,12 +162,32 @@ func slugLabel(label string) string {
 	return strings.Trim(b.String(), "-")
 }
 
-// stripFences removes a leading ```json / ``` fence and a trailing ``` fence if
-// the model wrapped its JSON despite instructions to the contrary.
+// hyperedgeID builds a deterministic id for a hyperedge. Source file and model
+// id are slugified to prevent ':' in paths from breaking the delimiter scheme.
+// When either is empty a sha256 of the label+members is used as a stable fallback
+// so two genuinely different hyperedges cannot collide.
+func hyperedgeID(repo, sourceFile, modelID, label string, members []string) string {
+	sf := slugLabel(sourceFile)
+	mid := slugLabel(modelID)
+	if sf == "" || mid == "" {
+		h := sha256.New()
+		h.Write([]byte(label))
+		for _, m := range members {
+			h.Write([]byte(m))
+		}
+		return fmt.Sprintf("he:%s:%x", repo, h.Sum(nil)[:8])
+	}
+	return fmt.Sprintf("he:%s:%s:%s", repo, sf, mid)
+}
+
+// stripFences extracts the JSON object from the first '{' to the last '}', which
+// handles all model fence variants (```json, ```JSON, ``` json, trailing prose).
 func stripFences(body []byte) []byte {
-	s := strings.TrimSpace(string(body))
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
-	return []byte(strings.TrimSpace(s))
+	s := string(body)
+	start := strings.Index(s, "{")
+	end := strings.LastIndex(s, "}")
+	if start == -1 || end == -1 || end < start {
+		return body
+	}
+	return []byte(s[start : end+1])
 }

@@ -20,13 +20,12 @@ import (
 //
 // modulePath is the module path read from go.mod (e.g. "example.com/broken").
 // absRepoRoot is the absolute path to the repository root.
-// files is the full analyzer scope (repo-relative paths).
-// pkgFiles are the absolute paths of files belonging to this broken package.
+// pkgFiles are the absolute paths of files belonging to this broken package;
+// the caller is responsible for filtering them to the analysis scope before passing.
 func fallbackAnalyzeGoPackage(
 	log *slog.Logger,
 	modulePath string,
 	absRepoRoot string,
-	scope map[string]bool,
 	pkgFiles []string,
 ) Result {
 	lang := golang.GetLanguage()
@@ -38,12 +37,11 @@ func fallbackAnalyzeGoPackage(
 		root    *sitter.Node
 	}
 
+	var res Result
+
 	parsed := make([]parsedFile, 0, len(pkgFiles))
 	for _, absPath := range pkgFiles {
 		rel := repoRelPath(absRepoRoot, absPath)
-		if !scope[rel] {
-			continue
-		}
 		src, err := os.ReadFile(absPath) //nolint:gosec
 		if err != nil {
 			log.Warn("fallback: cannot read file", slog.String("file", rel), slog.String("err", err.Error()))
@@ -52,6 +50,7 @@ func fallbackAnalyzeGoPackage(
 		root, err := sitter.ParseCtx(context.Background(), src, lang)
 		if err != nil {
 			log.Warn("fallback: tree-sitter parse error", slog.String("file", rel), slog.String("err", err.Error()))
+			res.ParseErrors++
 			continue
 		}
 		pkgPath := fallbackPkgPath(modulePath, absRepoRoot, absPath)
@@ -59,7 +58,7 @@ func fallbackAnalyzeGoPackage(
 	}
 
 	if len(parsed) == 0 {
-		return Result{}
+		return res
 	}
 
 	// Build a package-wide name -> entityID map for intra-package call resolution.
@@ -67,8 +66,6 @@ func fallbackAnalyzeGoPackage(
 	for _, pf := range parsed {
 		collectFuncDefs(pf.pkgPath, pf.root, pf.src, pkgDefs)
 	}
-
-	var res Result
 
 	for _, pf := range parsed {
 		emitFallbackFile(log, pf.relPath, pf.pkgPath, pf.src, pf.root, pkgDefs, &res)

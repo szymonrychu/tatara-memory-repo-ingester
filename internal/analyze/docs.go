@@ -2,6 +2,7 @@ package analyze
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,12 +12,14 @@ import (
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/contract"
 )
 
-type docsAnalyzer struct{}
+type docsAnalyzer struct {
+	log *slog.Logger
+}
 
 // NewDocs returns the docs analyzer. It emits one doc_file entity per file
 // (so docs participate in the code graph) plus a semantic chunk, and captures
 // YAML frontmatter (source_url/author/captured_at) onto the entity.
-func NewDocs() Analyzer { return docsAnalyzer{} }
+func NewDocs() Analyzer { return docsAnalyzer{log: slog.Default()} }
 
 func (docsAnalyzer) Name() string { return "docs" }
 
@@ -28,12 +31,13 @@ func (docsAnalyzer) Match(path string) bool {
 	return false
 }
 
-func (docsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) (Result, error) {
+func (d docsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) (Result, error) {
 	var res Result
 	for _, f := range files {
 		b, err := os.ReadFile(filepath.Join(repoRoot, f)) //nolint:gosec
 		if err != nil {
-			continue // unreadable doc: skip, do not fail the run
+			d.log.Warn("docs: unreadable file; skipping", "file", f, "error", err)
+			continue
 		}
 		lang := "markdown"
 		if strings.ToLower(filepath.Ext(f)) == ".txt" {
@@ -74,6 +78,7 @@ type docFrontmatter struct {
 // a zero docFrontmatter and the original content unchanged. A malformed block is
 // ignored (zero provenance) and the original content is returned.
 func splitFrontmatter(content string) (docFrontmatter, string) {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
 	if !strings.HasPrefix(content, "---\n") {
 		return docFrontmatter{}, content
 	}

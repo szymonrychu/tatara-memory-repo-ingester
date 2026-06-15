@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
@@ -129,11 +130,12 @@ func (g goAnalyzer) Analyze(ctx context.Context, repoRoot string, files []string
 			if len(pkgFiles) == 0 {
 				continue
 			}
-			fallbackRes := fallbackAnalyzeGoPackage(g.log, modulePath, absRepoRoot, scope, pkgFiles)
+			fallbackRes := fallbackAnalyzeGoPackage(g.log, modulePath, absRepoRoot, pkgFiles)
 			res.Entities = append(res.Entities, fallbackRes.Entities...)
 			res.Edges = append(res.Edges, fallbackRes.Edges...)
 			res.Chunks = append(res.Chunks, fallbackRes.Chunks...)
 			res.Symbols = append(res.Symbols, fallbackRes.Symbols...)
+			res.ParseErrors += fallbackRes.ParseErrors
 			continue
 		}
 		g.processPackage(pkg, pkgPaths, absRepoRoot, scope, modulePath, &res)
@@ -169,11 +171,21 @@ func (g goAnalyzer) processPackage(
 ) {
 	pkgID := "go:package:" + pkg.PkgPath
 
-	res.Entities = append(res.Entities, contract.Entity{
-		ID:   pkgID,
-		Name: pkg.Name,
-		Type: contract.EntityGoPackage,
-	})
+	// pkgEntityEmitted tracks whether we have already appended the package entity.
+	// We defer emission until the first in-scope func/method is found so that
+	// packages with no in-scope files contribute nothing to the push payload.
+	pkgEntityEmitted := false
+	emitPkgEntityOnce := func() {
+		if pkgEntityEmitted {
+			return
+		}
+		pkgEntityEmitted = true
+		res.Entities = append(res.Entities, contract.Entity{
+			ID:   pkgID,
+			Name: pkg.Name,
+			Type: contract.EntityGoPackage,
+		})
+	}
 
 	var funcs []goFuncInfo
 
@@ -191,6 +203,7 @@ func (g goAnalyzer) processPackage(
 			if !ok {
 				continue
 			}
+			emitPkgEntityOnce()
 
 			entityID, entityType, name := funcEntityID(pkg.PkgPath, fd)
 
@@ -268,9 +281,23 @@ func (g goAnalyzer) processPackage(
 	}
 
 	// Emit requires SymbolRows: walk TypesInfo.Uses for cross-module refs under crossRepoPrefix.
+	// Iterate in Pos() order for reproducible output (map iteration order is random).
 	if g.crossRepoPrefix != "" && modulePath != "" && pkg.TypesInfo != nil {
-		seenReq := map[string]bool{}
+		type usesEntry struct {
+			ident *ast.Ident
+			obj   types.Object
+		}
+		sorted := make([]usesEntry, 0, len(pkg.TypesInfo.Uses))
 		for ident, obj := range pkg.TypesInfo.Uses {
+			sorted = append(sorted, usesEntry{ident, obj})
+		}
+		sort.Slice(sorted, func(i, j int) bool {
+			return sorted[i].ident.Pos() < sorted[j].ident.Pos()
+		})
+
+		seenReq := map[string]bool{}
+		for _, entry := range sorted {
+			ident, obj := entry.ident, entry.obj
 			if obj == nil || obj.Pkg() == nil {
 				continue
 			}

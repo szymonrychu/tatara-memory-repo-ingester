@@ -584,6 +584,151 @@ func TestRunSemanticStageBestEffortOnLLMError(t *testing.T) {
 	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
 }
 
+// TestRunSCIPPathTaggedWithSCIPExtractor verifies finding 1: the SCIP ingest
+// path must tag its GraphPush with extractor="scip", not leave it empty (which
+// would cause the server to treat it as "ast" and clobber AST rows).
+func TestRunSCIPPathTaggedWithSCIPExtractor(t *testing.T) {
+	const symA = "go 1.0 `main`/A()."
+	idx := &scipbindings.Index{
+		Metadata: &scipbindings.Metadata{
+			Version:              0,
+			ProjectRoot:          "file:///repo",
+			TextDocumentEncoding: scipbindings.TextEncoding_UTF8,
+		},
+		Documents: []*scipbindings.Document{
+			{
+				RelativePath: "foo.go",
+				Language:     "go",
+				Symbols: []*scipbindings.SymbolInformation{
+					{Symbol: symA, Kind: scipbindings.SymbolInformation_Function, DisplayName: "A"},
+				},
+				Occurrences: []*scipbindings.Occurrence{
+					{Range: []int32{0, 0, 5, 0}, Symbol: symA, SymbolRoles: int32(scipbindings.SymbolRole_Definition)},
+				},
+			},
+		},
+	}
+	b, err := proto.Marshal(idx)
+	require.NoError(t, err)
+	tmp := filepath.Join(t.TempDir(), "index.scip")
+	require.NoError(t, os.WriteFile(tmp, b, 0o600))
+
+	var capturedPush contract.GraphPush
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph:bulk":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &capturedPush)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"myrepo"}`))
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	opts := options{scipPath: tmp, scipRepo: "myrepo", baseURL: srv.URL}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+	require.Equal(t, contract.ExtractorSCIP, capturedPush.Extractor,
+		"SCIP ingest must tag its push with extractor=scip, not empty (which server maps to ast)")
+}
+
+// TestRunSemanticUnreadableMissFileExcludedFromPush verifies finding 2: an
+// unreadable miss file must NOT appear in the Files field of the semantic
+// GraphPush so the server does not purge its existing semantic rows with no
+// replacement.
+func TestRunSemanticUnreadableMissFileExcludedFromPush(t *testing.T) {
+	dir := newGitRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "readable.go"),
+		[]byte("package m\n\nfunc A() {}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/m\n\ngo 1.25\n"), 0o644))
+	commitAll(t, dir, "init")
+
+	// Fake OpenAI returns a valid fragment for readable.go.
+	openai := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		frag := `{"nodes":[{"id":"misc_idea","label":"Misc Idea","file_type":"concept","source_file":"readable.go"}],"edges":[],"hyperedges":[]}`
+		out := map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": frag}}}}
+		_ = json.NewEncoder(w).Encode(out)
+	}))
+	defer openai.Close()
+
+	var semanticPush contract.GraphPush
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph/semantic-misses":
+			// Return both readable.go and a nonexistent file as misses.
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`["readable.go","nonexistent.go"]`))
+		case "/code-graph:bulk":
+			var p contract.GraphPush
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &p)
+			if p.Extractor == contract.ExtractorSemantic {
+				semanticPush = p
+			}
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		default:
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	env := map[string]string{"OPENAI_API_KEY": "sk-test", "OPENAI_BASE_URL": openai.URL}
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, getenv: func(k string) string { return env[k] }}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+
+	require.Contains(t, semanticPush.Files, "readable.go",
+		"readable miss file must be in semantic push Files")
+	require.NotContains(t, semanticPush.Files, "nonexistent.go",
+		"unreadable miss file must NOT be in semantic push Files (would cause server-side purge with no replacement)")
+}
+
+// TestRunPushesMetricsWhenURLSet verifies the obs metrics scaffold is actually
+// wired: when metricsPushURL is set, run() POSTs the gathered Prometheus text
+// (including ingest_runs_total) to that URL at job end.
+func TestRunPushesMetricsWhenURLSet(t *testing.T) {
+	dir := t.TempDir()
+	for _, a := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
+		c := exec.Command("git", a...)
+		c.Dir = dir
+		require.NoError(t, c.Run())
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "doc.md"), []byte("# Doc\n\nbody\n"), 0o644))
+	commitAll(t, dir, "init")
+
+	var metricsBody atomic.Value
+	metricsBody.Store("")
+	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		metricsBody.Store(string(b))
+		w.WriteHeader(200)
+	}))
+	defer metrics.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph:bulk":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		default:
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, metricsPushURL: metrics.URL}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+
+	got := metricsBody.Load().(string)
+	require.Contains(t, got, "ingest_runs_total", "metrics push must carry the gathered Prometheus text")
+}
+
 // newGitRepo creates an initialized git repo in a temp dir.
 func newGitRepo(t *testing.T) string {
 	t.Helper()

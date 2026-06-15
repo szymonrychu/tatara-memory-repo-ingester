@@ -2,6 +2,7 @@ package analyze_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -30,6 +31,7 @@ func TestTerraformAnalyzer(t *testing.T) {
 	require.Equal(t, contract.EntityTFResource, ids["tf:resource:null_resource.b"], "tf_resource entity b")
 	require.Equal(t, contract.EntityTFModule, ids["tf:module:child"], "tf_module entity")
 	require.Equal(t, contract.EntityTFOutput, ids["tf:output:id"], "tf_output entity")
+	require.Equal(t, contract.EntityTFData, ids["tf:data:aws_ami.ubuntu"], "tf_data entity")
 
 	// var_ref: resource null_resource.a -> variable name
 	varRefEdge, ok := findEdge(res.Edges, contract.RelVarRef, "tf:resource:null_resource.a", "tf:variable:name")
@@ -48,6 +50,31 @@ func TestTerraformAnalyzer(t *testing.T) {
 	// module_source: module child -> source path
 	_, ok = findEdge(res.Edges, contract.RelModuleSource, "tf:module:child", "./modules/child")
 	require.True(t, ok, "module child should have module_source edge")
+
+	// data reference: null_resource.c -> data aws_ami.ubuntu (finding 1 + 2)
+	_, ok = findEdge(res.Edges, contract.RelReferences, "tf:resource:null_resource.c", "tf:data:aws_ami.ubuntu")
+	require.True(t, ok, "null_resource.c should reference tf:data:aws_ami.ubuntu (not tf:resource:data.aws_ami)")
+
+	// depends_on data: null_resource.c -> data aws_ami.ubuntu (finding 1 + 2)
+	_, ok = findEdge(res.Edges, contract.RelDependsOn, "tf:resource:null_resource.c", "tf:data:aws_ami.ubuntu")
+	require.True(t, ok, "null_resource.c should have depends_on tf:data:aws_ami.ubuntu")
+
+	// builtin roots must NOT produce any tf:resource:local.*, tf:resource:each.*, etc. edges (finding 2)
+	builtinPrefixes := []string{
+		"tf:resource:local.",
+		"tf:resource:each.",
+		"tf:resource:count.",
+		"tf:resource:path.",
+		"tf:resource:self.",
+		"tf:resource:terraform.",
+		"tf:resource:data.",
+	}
+	for _, e := range res.Edges {
+		for _, prefix := range builtinPrefixes {
+			require.False(t, strings.HasPrefix(e.To, prefix),
+				"spurious edge to builtin/data pseudo-resource %q (from %q)", e.To, e.From)
+		}
+	}
 
 	// Contract: all entity FilePaths are in the files set; all edge SrcFiles are in the files set
 	filesScope := map[string]bool{"main.tf": true}

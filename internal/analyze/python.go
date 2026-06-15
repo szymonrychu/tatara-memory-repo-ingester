@@ -42,7 +42,10 @@ func (p pythonAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 		moduleFQN string
 		src       []byte
 		root      *sitter.Node
+		defs      map[string]string
 	}
+	var res Result
+
 	parsed := make([]parsedFile, 0, len(files))
 	for _, relPath := range files {
 		absPath := filepath.Join(repoRoot, relPath)
@@ -53,13 +56,16 @@ func (p pythonAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 		root, err := sitter.ParseCtx(context.Background(), src, lang)
 		if err != nil {
 			p.log.Warn("tree-sitter parse error", slog.String("file", relPath), slog.String("err", err.Error()))
+			res.ParseErrors++
 			continue
 		}
+		moduleFQN := pathToFQN(relPath)
 		parsed = append(parsed, parsedFile{
 			relPath:   relPath,
-			moduleFQN: pathToFQN(relPath),
+			moduleFQN: moduleFQN,
 			src:       src,
 			root:      root,
+			defs:      pyFileDefs(moduleFQN, root, src),
 		})
 	}
 
@@ -67,17 +73,14 @@ func (p pythonAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 	// Used for global_name_match and ambiguous_multi_def resolution.
 	repoIndex := map[string][]string{}
 	for _, pf := range parsed {
-		defs := pyFileDefs(pf.moduleFQN, pf.root, pf.src)
-		for name, id := range defs {
+		for name, id := range pf.defs {
 			repoIndex[name] = append(repoIndex[name], id)
 		}
 	}
 
-	var res Result
-
 	for _, pf := range parsed {
-		// Build module-level def map (scoped resolution).
-		moduleDefs := pyFileDefs(pf.moduleFQN, pf.root, pf.src)
+		// Reuse the cached module-level def map (scoped resolution).
+		moduleDefs := pf.defs
 
 		// Build import map: local name -> entityID resolved via tracked imports.
 		importMap := pyImportMap(pf.root, pf.src, repoIndex)
@@ -173,15 +176,37 @@ func pyImportMap(root *sitter.Node, src []byte, repoIndex map[string][]string) m
 				if n == child.ChildByFieldName("module_name") {
 					continue
 				}
-				// Each imported name is a dotted_name or identifier node.
-				localName := n.Content(src)
-				candidateID := "py:func:" + moduleFQN + "." + localName
-				// Check if this entity is known in the repo index.
-				ids := repoIndex[localName]
-				for _, id := range ids {
-					if id == candidateID {
-						imports[localName] = candidateID
-						break
+				switch n.Type() {
+				case "wildcard_import":
+					// "from m import *" - skip; we cannot resolve individual names.
+					continue
+				case "aliased_import":
+					// "from m import a as b" - map alias b -> candidate for a.
+					nameField := n.ChildByFieldName("name")
+					aliasField := n.ChildByFieldName("alias")
+					if nameField == nil || aliasField == nil {
+						continue
+					}
+					importedName := nameField.Content(src)
+					aliasName := aliasField.Content(src)
+					candidateID := "py:func:" + moduleFQN + "." + importedName
+					ids := repoIndex[importedName]
+					for _, id := range ids {
+						if id == candidateID {
+							imports[aliasName] = candidateID
+							break
+						}
+					}
+				default:
+					// dotted_name or identifier: plain name import.
+					localName := n.Content(src)
+					candidateID := "py:func:" + moduleFQN + "." + localName
+					ids := repoIndex[localName]
+					for _, id := range ids {
+						if id == candidateID {
+							imports[localName] = candidateID
+							break
+						}
 					}
 				}
 			}
@@ -456,6 +481,7 @@ func (p pythonAnalyzer) emitFunc(
 	}
 
 	danglingCalls := []string{}
+	seenEdge := map[string]bool{}
 
 	walkCalls(body, src, func(calleeNode *sitter.Node) {
 		calleeName := calleeNode.Content(src)
@@ -470,6 +496,10 @@ func (p pythonAnalyzer) emitFunc(
 		//
 		// Tier 1: scoped_name_match - callee defined in this module.
 		if calleeID, ok := moduleDefs[calleeName]; ok {
+			if seenEdge[funcID+"->"+calleeID] {
+				return
+			}
+			seenEdge[funcID+"->"+calleeID] = true
 			conf := contract.ConfidenceFor(contract.ResScopedNameMatch)
 			props := map[string]string{
 				"resolution": contract.ResScopedNameMatch,
@@ -490,6 +520,10 @@ func (p pythonAnalyzer) emitFunc(
 
 		// Tier 2: imported_name_match - callee resolves through a tracked import.
 		if calleeID, ok := importMap[calleeName]; ok {
+			if seenEdge[funcID+"->"+calleeID] {
+				return
+			}
+			seenEdge[funcID+"->"+calleeID] = true
 			conf := contract.ConfidenceFor(contract.ResImportedNameMatch)
 			props := map[string]string{
 				"resolution": contract.ResImportedNameMatch,
@@ -517,6 +551,10 @@ func (p pythonAnalyzer) emitFunc(
 
 		case 1:
 			// global_name_match: unique repo-wide definition.
+			if seenEdge[funcID+"->"+ids[0]] {
+				return
+			}
+			seenEdge[funcID+"->"+ids[0]] = true
 			conf := contract.ConfidenceFor(contract.ResGlobalNameMatch)
 			props := map[string]string{
 				"resolution": contract.ResGlobalNameMatch,
@@ -536,6 +574,10 @@ func (p pythonAnalyzer) emitFunc(
 		default:
 			// ambiguous_multi_def: multiple repo-wide definitions.
 			for _, id := range ids {
+				if seenEdge[funcID+"->"+id] {
+					continue
+				}
+				seenEdge[funcID+"->"+id] = true
 				props := map[string]string{
 					"resolution": contract.ResAmbiguousMultiDef,
 					"confidence": contract.ConfidenceFor(contract.ResAmbiguousMultiDef),

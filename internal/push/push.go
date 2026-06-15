@@ -7,11 +7,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/contract"
 )
+
+// maxJobWait caps how long PushChunks will poll for a job to reach terminal
+// state. The cron Job activeDeadlineSeconds is a hard backstop, but the
+// client should fail fast with a clear error rather than spin forever if the
+// server is stuck or returns an unrecognised non-terminal status.
+const maxJobWait = 30 * time.Minute
+
+// maxRetries is the number of additional attempts for transient errors on any
+// HTTP call (total attempts = maxRetries+1).
+const maxRetries = 2
+
+// retryDelay is the base backoff between retry attempts; overridable in tests.
+var retryDelay = 200 * time.Millisecond
 
 // Client posts to a tatara-memory base URL.
 type Client struct {
@@ -27,10 +41,18 @@ func New(base string, hc *http.Client, pollInterval time.Duration) *Client {
 
 // PushGraph posts a GraphPush synchronously and returns the reconciliation summary.
 func (c *Client) PushGraph(ctx context.Context, p contract.GraphPush) (contract.PushResult, error) {
+	start := time.Now()
 	var res contract.PushResult
-	if err := c.do(ctx, http.MethodPost, "/code-graph:bulk", p, http.StatusOK, &res); err != nil {
+	if err := c.doWithRetry(ctx, http.MethodPost, "/code-graph:bulk", p, http.StatusOK, &res); err != nil {
 		return contract.PushResult{}, err
 	}
+	slog.Info("PushGraph",
+		"action", "PushGraph",
+		"repo", p.Repo,
+		"entities", len(p.Entities),
+		"edges", len(p.Edges),
+		"files", len(p.Files),
+		"duration_ms", time.Since(start).Milliseconds())
 	return res, nil
 }
 
@@ -44,40 +66,102 @@ func (c *Client) PushChunks(ctx context.Context, repo string, reconcileFiles []s
 	if len(items) == 0 && len(reconcileFiles) == 0 {
 		return nil
 	}
+	start := time.Now()
+	var polls int
 	var job contract.IngestJob
 	body := contract.BulkMemoriesRequest{Repo: repo, ReconcileFiles: reconcileFiles, Items: items}
-	if err := c.do(ctx, http.MethodPost, "/memories:bulk", body, http.StatusAccepted, &job); err != nil {
+	if err := c.doWithRetry(ctx, http.MethodPost, "/memories:bulk", body, http.StatusAccepted, &job); err != nil {
 		return err
 	}
+
+	// Bound how long we poll so a stuck job does not block forever.
+	pollCtx, cancel := context.WithTimeout(ctx, maxJobWait)
+	defer cancel()
+
 	for !job.Terminal() {
+		polls++
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-pollCtx.Done():
+			return fmt.Errorf("ingest job %s did not reach terminal within %s: %w", job.ID, maxJobWait, pollCtx.Err())
 		case <-time.After(c.pollInterval):
 		}
-		if err := c.do(ctx, http.MethodGet, "/ingest-jobs/"+job.ID, nil, http.StatusOK, &job); err != nil {
+		// Retry transient poll errors: a momentary 502/503 on the status read
+		// must not abort an in-flight job. 4xx (job gone) is not retried.
+		if err := c.doWithRetry(pollCtx, http.MethodGet, "/ingest-jobs/"+job.ID, nil, http.StatusOK, &job); err != nil {
 			return err
 		}
 	}
 	if job.Status != contract.JobSucceeded {
 		return fmt.Errorf("ingest job %s ended %s (failed=%d)", job.ID, job.Status, job.Failed)
 	}
+	slog.Info("PushChunks",
+		"action", "PushChunks",
+		"repo", repo,
+		"job_id", job.ID,
+		"items", len(items),
+		"reconcile_files", len(reconcileFiles),
+		"polls", polls,
+		"duration_ms", time.Since(start).Milliseconds())
 	return nil
 }
 
 // SemanticMisses asks the server which of the supplied files need semantic
 // re-extraction (stored content_sha differs or is absent) and returns their paths.
 func (c *Client) SemanticMisses(ctx context.Context, req contract.SemanticMissesRequest) ([]string, error) {
+	start := time.Now()
 	var misses []string
-	if err := c.do(ctx, http.MethodPost, "/code-graph/semantic-misses", req, http.StatusOK, &misses); err != nil {
+	if err := c.doWithRetry(ctx, http.MethodPost, "/code-graph/semantic-misses", req, http.StatusOK, &misses); err != nil {
 		return nil, err
 	}
+	slog.Info("SemanticMisses",
+		"action", "SemanticMisses",
+		"repo", req.Repo,
+		"files_queried", len(req.Files),
+		"misses", len(misses),
+		"duration_ms", time.Since(start).Milliseconds())
 	return misses, nil
 }
 
 // HTTP exposes the underlying HTTP client so callers (e.g. the LLM stage) reuse
 // the same authenticated transport.
 func (c *Client) HTTP() *http.Client { return c.http }
+
+// doWithRetry calls do() and retries on transient errors (5xx, 429, network)
+// up to maxRetries additional attempts with a fixed backoff. 4xx errors are
+// returned immediately.
+func (c *Client) doWithRetry(ctx context.Context, method, path string, in any, want int, out any) error {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryDelay):
+			}
+		}
+		err := c.do(ctx, method, path, in, want, out)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isTransient(err) {
+			return err
+		}
+	}
+	return lastErr
+}
+
+// transientError wraps an error that is eligible for retry.
+type transientError struct{ cause error }
+
+func (e *transientError) Error() string { return e.cause.Error() }
+func (e *transientError) Unwrap() error { return e.cause }
+
+// isTransient returns true when err was produced by a retryable condition.
+func isTransient(err error) bool {
+	_, ok := err.(*transientError) //nolint:errorlint
+	return ok
+}
 
 func (c *Client) do(ctx context.Context, method, path string, in any, want int, out any) error {
 	var rdr io.Reader
@@ -97,17 +181,26 @@ func (c *Client) do(ctx context.Context, method, path string, in any, want int, 
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("call %s: %w", path, err)
+		// Network/transport errors are transient.
+		return &transientError{cause: fmt.Errorf("call %s: %w", path, err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != want {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("%s: status %d: %s", path, resp.StatusCode, string(b))
+		err := fmt.Errorf("%s: status %d: %s", path, resp.StatusCode, string(b))
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			return &transientError{cause: err}
+		}
+		return err
 	}
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 			return fmt.Errorf("decode %s: %w", path, err)
 		}
 	}
+	// Drain any unread bytes so the underlying TCP connection can be reused
+	// (HTTP keep-alive). json.Decoder stops at the first JSON value; trailing
+	// newlines are common and would otherwise prevent connection reuse.
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }

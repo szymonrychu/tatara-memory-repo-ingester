@@ -39,6 +39,7 @@ func (ta terraformAnalyzer) Analyze(_ context.Context, repoRoot string, files []
 		hclFile, diags := parser.ParseHCLFile(absPath)
 		if diags.HasErrors() {
 			ta.log.Warn("hcl parse error", "file", relPath, "err", diags.Error())
+			res.ParseErrors++
 			continue
 		}
 		body, ok := hclFile.Body.(*hclsyntax.Body)
@@ -285,6 +286,25 @@ func (ta terraformAnalyzer) edgesFromExpr(srcID, srcFile string, expr hclsyntax.
 					"confidence": contract.ConfidenceFor(contract.ResTypeResolved),
 				},
 			})
+		case "data":
+			// data.<type>.<name>.* -> tf:data:<type>.<name>
+			if len(traversal) >= 3 {
+				nameAttr, ok2 := traversal[2].(hcl.TraverseAttr)
+				if ok2 {
+					edges = append(edges, contract.Edge{
+						From:     srcID,
+						To:       fmt.Sprintf("tf:data:%s.%s", attr.Name, nameAttr.Name),
+						Relation: contract.RelReferences,
+						SrcFile:  srcFile,
+						Properties: map[string]string{
+							"resolution": contract.ResTypeResolved,
+							"confidence": contract.ConfidenceFor(contract.ResTypeResolved),
+						},
+					})
+				}
+			}
+		case "local", "each", "count", "path", "self", "terraform":
+			// built-in meta-references; no graph edge
 		default:
 			// resource reference: <type>.<name>.*
 			edges = append(edges, contract.Edge{
@@ -319,8 +339,21 @@ func (ta terraformAnalyzer) dependsOnEdges(srcID, srcFile string, expr hclsyntax
 		switch root {
 		case "module":
 			toID = "tf:module:" + attr.Name
+		case "data":
+			// data.<type>.<name> -> tf:data:<type>.<name>
+			if len(traversal) >= 3 {
+				nameAttr, ok2 := traversal[2].(hcl.TraverseAttr)
+				if ok2 {
+					toID = fmt.Sprintf("tf:data:%s.%s", attr.Name, nameAttr.Name)
+				}
+			}
+		case "local", "each", "count", "path", "self", "terraform", "var":
+			// built-in or variable references; skip in depends_on context
 		default:
 			toID = fmt.Sprintf("tf:resource:%s.%s", root, attr.Name)
+		}
+		if toID == "" {
+			continue
 		}
 		edges = append(edges, contract.Edge{
 			From:     srcID,

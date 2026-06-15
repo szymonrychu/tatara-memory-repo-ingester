@@ -118,7 +118,106 @@ func TestParseFragmentHyperedges(t *testing.T) {
 	require.InDelta(t, 0.75, h.ConfidenceScore, 1e-9)
 	require.Equal(t, "auth/session.go", h.SrcFile)
 	require.Len(t, h.Members, 3)
-	require.Equal(t, "he:myrepo:auth/session.go:auth_flow", h.ID)
+	// IDs are now slugified to avoid ':' delimiter collisions.
+	require.Equal(t, "he:myrepo:auth-session-go:auth-flow", h.ID)
+}
+
+// TestParseFragmentHyperedgeMembersRemapped asserts that hyperedge members that
+// match a concept/rationale node id are rewritten to their canonical ids, exactly
+// as edge endpoints are via remapID (finding 2).
+func TestParseFragmentHyperedgeMembersRemapped(t *testing.T) {
+	res, err := ParseFragment("myrepo", []byte(sampleFragment))
+	require.NoError(t, err)
+	require.Len(t, res.Hyperedges, 1)
+	members := res.Hyperedges[0].Members
+	// auth_session_validatetoken: non-concept, passes through unchanged.
+	require.Equal(t, "auth_session_validatetoken", members[0])
+	// retry_backoff -> concept:myrepo:retry-backoff
+	require.Equal(t, "concept:myrepo:retry-backoff", members[1])
+	// why_jitter -> concept:myrepo:why-jitter
+	require.Equal(t, "concept:myrepo:why-jitter", members[2])
+}
+
+// TestParseFragmentHyperedgeIDSlugified asserts ':' in source_file does not break
+// the id delimiter scheme, and that raw model ids with non-slug chars are normalized
+// (finding 1).
+func TestParseFragmentHyperedgeIDSlugified(t *testing.T) {
+	frag := `{"nodes":[],"edges":[],"hyperedges":[
+	  {"id":"my:edge","label":"x","nodes":["a","b","c"],"relation":"form","confidence_score":0.7,"source_file":"path/to:file.go"}
+	]}`
+	res, err := ParseFragment("r", []byte(frag))
+	require.NoError(t, err)
+	require.Len(t, res.Hyperedges, 1)
+	// ':' in source_file and id must be slugified to '-'.
+	require.Equal(t, "he:r:path-to-file-go:my-edge", res.Hyperedges[0].ID)
+}
+
+// TestParseFragmentHyperedgeSkipsFewerThanThreeMembers asserts that hyperedges with
+// fewer than 3 members (contract says 3+) are dropped (finding 1).
+func TestParseFragmentHyperedgeSkipsFewerThanThreeMembers(t *testing.T) {
+	frag := `{"nodes":[],"edges":[],"hyperedges":[
+	  {"id":"too-small","label":"x","nodes":["a","b"],"relation":"form","confidence_score":0.7,"source_file":"f.go"},
+	  {"id":"just-right","label":"y","nodes":["a","b","c"],"relation":"form","confidence_score":0.7,"source_file":"f.go"}
+	]}`
+	res, err := ParseFragment("r", []byte(frag))
+	require.NoError(t, err)
+	require.Len(t, res.Hyperedges, 1)
+	require.Equal(t, "he:r:f-go:just-right", res.Hyperedges[0].ID)
+}
+
+// TestParseFragmentHyperedgeFallbackIDOnEmptyFields asserts that when source_file
+// or id are empty the id falls back to a hash of members+label (finding 1).
+func TestParseFragmentHyperedgeFallbackIDOnEmptyFields(t *testing.T) {
+	frag := `{"nodes":[],"edges":[],"hyperedges":[
+	  {"id":"","label":"Auth Flow","nodes":["a","b","c"],"relation":"form","confidence_score":0.7,"source_file":""}
+	]}`
+	res, err := ParseFragment("r", []byte(frag))
+	require.NoError(t, err)
+	require.Len(t, res.Hyperedges, 1)
+	// Must be a stable fallback id, not "he:r::" which collides.
+	require.NotEqual(t, "he:r::", res.Hyperedges[0].ID)
+	require.True(t, len(res.Hyperedges[0].ID) > len("he:r::"))
+}
+
+// TestParseFragmentEdgesSkipEmptyOrSelfEndpoints asserts that edges with empty
+// From/To or self-loops are dropped (finding 4).
+func TestParseFragmentEdgesSkipEmptyOrSelfEndpoints(t *testing.T) {
+	frag := `{"nodes":[],"edges":[
+	  {"source":"","target":"x","relation":"calls","confidence_score":0.8,"source_file":"f.go"},
+	  {"source":"a","target":"","relation":"calls","confidence_score":0.8,"source_file":"f.go"},
+	  {"source":"a","target":"a","relation":"calls","confidence_score":0.8,"source_file":"f.go"},
+	  {"source":"a","target":"b","relation":"calls","confidence_score":0.8,"source_file":"f.go"}
+	],"hyperedges":[]}`
+	res, err := ParseFragment("r", []byte(frag))
+	require.NoError(t, err)
+	require.Len(t, res.Edges, 1)
+	require.Equal(t, "a", res.Edges[0].From)
+	require.Equal(t, "b", res.Edges[0].To)
+}
+
+// TestStripFencesRobust asserts that stripFences extracts valid JSON even with
+// unusual fence variations: uppercase JSON, space after backticks, trailing prose,
+// or a leading fence with no newline before the opening brace (finding 3).
+func TestStripFencesRobust(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"bare json", `{"nodes":[],"edges":[],"hyperedges":[]}`},
+		{"backtick-json fence", "```json\n{\"nodes\":[],\"edges\":[],\"hyperedges\":[]}\n```"},
+		{"bare backtick fence", "```\n{\"nodes\":[],\"edges\":[],\"hyperedges\":[]}\n```"},
+		{"uppercase JSON fence", "```JSON\n{\"nodes\":[],\"edges\":[],\"hyperedges\":[]}\n```"},
+		{"space after backtick", "``` json\n{\"nodes\":[],\"edges\":[],\"hyperedges\":[]}\n```"},
+		{"trailing prose", "{\"nodes\":[],\"edges\":[],\"hyperedges\":[]}\nSome explanation here."},
+		{"fence with trailing prose", "```json\n{\"nodes\":[],\"edges\":[],\"hyperedges\":[]}\n```\nExtra text."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := ParseFragment("r", []byte(tc.input))
+			require.NoError(t, err, "input: %q", tc.input)
+			_ = res
+		})
+	}
 }
 
 func TestParseFragmentHyperedgesCappedAtThree(t *testing.T) {
