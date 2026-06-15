@@ -2,6 +2,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: {{ include "tatara-memory-repo-ingester.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tatara-memory-repo-ingester.labels" . | nindent 4 }}
 spec:
@@ -12,10 +13,30 @@ spec:
         {{- include "tatara-memory-repo-ingester.selectorLabels" . | nindent 8 }}
     spec:
       restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: {{ .Values.resources.requests.cpu }}
+              memory: {{ .Values.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.resources.limits.cpu }}
+              memory: {{ .Values.resources.limits.memory }}
           envFrom:
             - configMapRef:
                 name: {{ include "tatara-memory-repo-ingester.fullname" . }}
