@@ -111,11 +111,10 @@ func TestParseBasic(t *testing.T) {
 	assert.Equal(t, "calls", edge.Relation)
 	assert.Equal(t, "foo.go", edge.SrcFile)
 	assert.Equal(t, "type_resolved", edge.Properties["resolution"])
-	assert.Equal(t, "0.98", edge.Properties["confidence"])
 
-	// Finding 3: typed confidence fields must be set.
-	assert.InDelta(t, 0.98, edge.ConfidenceScore, 1e-9, "ConfidenceScore must be 0.98")
-	assert.Equal(t, contract.TierInferred, edge.ConfidenceTier, "ConfidenceTier must be INFERRED")
+	// Finding 5 fix: type-resolved SCIP edges use ConfidenceScore=1.0 -> TierExtracted.
+	assert.InDelta(t, 1.0, edge.ConfidenceScore, 1e-9, "ConfidenceScore must be 1.0 (type-resolved)")
+	assert.Equal(t, contract.TierExtracted, edge.ConfidenceTier, "ConfidenceTier must be EXTRACTED")
 
 	// Finding 7: LineStart/LineEnd must be set from EnclosingRange (preferred) or Range.
 	// EnclosingRange for A = [0,0,5,0] -> LineStart=1 (0-based start+1), LineEnd=5
@@ -286,11 +285,14 @@ func TestConfidenceTypedFields(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, gp.Edges, 1)
 	e := gp.Edges[0]
-	assert.InDelta(t, 0.98, e.ConfidenceScore, 1e-9, "ConfidenceScore must be 0.98 not 0")
-	assert.Equal(t, contract.TierInferred, e.ConfidenceTier, "ConfidenceTier must not be empty")
+	// Finding 5 fix: type-resolved SCIP edges must be EXTRACTED (score=1.0).
+	assert.InDelta(t, 1.0, e.ConfidenceScore, 1e-9, "ConfidenceScore must be 1.0 (type-resolved)")
+	assert.Equal(t, contract.TierExtracted, e.ConfidenceTier, "ConfidenceTier must be EXTRACTED")
 }
 
-// TestSymbolRowsProvides verifies finding 4: definitions emit provides SymbolRows.
+// TestSymbolRowsProvides verifies findings 1+2+6: SCIP must NOT emit provides
+// SymbolRows. Cross-repo monikers are deferred to ROADMAP; raw SCIP symbol
+// strings clobber AST rows and cannot join on the server's cross-repo query.
 func TestSymbolRowsProvides(t *testing.T) {
 	const sym = "go 1.0 `pkg`/Foo()."
 	idx := &scipbindings.Index{
@@ -315,20 +317,13 @@ func TestSymbolRowsProvides(t *testing.T) {
 
 	gp, err := scip.Parse(writeIndex(t, idx), "repo")
 	require.NoError(t, err)
-
-	var provides []contract.SymbolRow
-	for _, sr := range gp.Symbols {
-		if sr.Role == contract.RoleProvides {
-			provides = append(provides, sr)
-		}
-	}
-	require.Len(t, provides, 1)
-	assert.Equal(t, sym, provides[0].Symbol)
-	assert.Equal(t, "go", provides[0].Lang)
-	assert.Equal(t, "foo.go", provides[0].SrcFile)
+	assert.Empty(t, gp.Symbols, "SCIP must not emit provides SymbolRows (deferred to ROADMAP)")
 }
 
-// TestSymbolRowsRequires verifies finding 4: references to external symbols emit requires SymbolRows.
+// TestSymbolRowsRequires verifies findings 1+2+6: SCIP must NOT emit requires
+// SymbolRows. Edges to external symbols are still emitted; only the SymbolRow
+// (cross-repo moniker) is suppressed until normalization + extractor-scoping are
+// implemented.
 func TestSymbolRowsRequires(t *testing.T) {
 	const (
 		symLocal    = "go 1.0 `pkg`/LocalFn()."
@@ -363,19 +358,12 @@ func TestSymbolRowsRequires(t *testing.T) {
 	gp, err := scip.Parse(writeIndex(t, idx), "repo")
 	require.NoError(t, err)
 
-	// Edge should be emitted (ExternalSymbols provides kind info -> "calls").
+	// Edge must still be emitted (ExternalSymbols provides kind info -> "calls").
 	require.Len(t, gp.Edges, 1)
 	assert.Equal(t, "calls", gp.Edges[0].Relation, "external function reference must produce calls edge")
 
-	// requires SymbolRow must be present.
-	var requires []contract.SymbolRow
-	for _, sr := range gp.Symbols {
-		if sr.Role == contract.RoleRequires {
-			requires = append(requires, sr)
-		}
-	}
-	require.Len(t, requires, 1)
-	assert.Equal(t, symExternal, requires[0].Symbol)
+	// No SymbolRows: cross-repo monikers deferred to ROADMAP.
+	assert.Empty(t, gp.Symbols, "SCIP must not emit requires SymbolRows (deferred to ROADMAP)")
 }
 
 // TestExternalSymbolsKindLookup verifies finding 5: Index.ExternalSymbols is
@@ -625,6 +613,198 @@ func TestRecursionEdge(t *testing.T) {
 	assert.Equal(t, "scip:go:"+sym, e.From)
 	assert.Equal(t, "scip:go:"+sym, e.To)
 	assert.Equal(t, contract.RelCalls, e.Relation)
+}
+
+// TestEnclosingDefInnermostWins verifies finding 3: when a reference falls
+// inside nested defs (outer and inner both contain refLine), the innermost
+// (smallest-span) def must win, not the first one in occurrence order.
+func TestEnclosingDefInnermostWins(t *testing.T) {
+	const (
+		outer  = "go 1.0 `main`/Outer()."
+		inner  = "go 1.0 `main`/inner()."
+		target = "go 1.0 `main`/Target()."
+	)
+	idx := &scipbindings.Index{
+		Documents: []*scipbindings.Document{
+			{
+				RelativePath: "nested.go",
+				Language:     "go",
+				Symbols: []*scipbindings.SymbolInformation{
+					{Symbol: outer, Kind: scipbindings.SymbolInformation_Function, DisplayName: "Outer"},
+					{Symbol: inner, Kind: scipbindings.SymbolInformation_Function, DisplayName: "inner"},
+					{Symbol: target, Kind: scipbindings.SymbolInformation_Function, DisplayName: "Target"},
+				},
+				Occurrences: []*scipbindings.Occurrence{
+					// Outer function body: lines 0-20
+					{
+						Range:          []int32{0, 5, 0, 10},
+						EnclosingRange: []int32{0, 0, 20, 0},
+						Symbol:         outer,
+						SymbolRoles:    int32(scipbindings.SymbolRole_Definition),
+					},
+					// Inner closure/function body: lines 5-15 (nested inside Outer)
+					{
+						Range:          []int32{5, 5, 5, 10},
+						EnclosingRange: []int32{5, 0, 15, 0},
+						Symbol:         inner,
+						SymbolRoles:    int32(scipbindings.SymbolRole_Definition),
+					},
+					// Target definition outside both
+					{
+						Range:          []int32{25, 5, 25, 11},
+						EnclosingRange: []int32{25, 0, 30, 0},
+						Symbol:         target,
+						SymbolRoles:    int32(scipbindings.SymbolRole_Definition),
+					},
+					// Reference to Target at line 8: inside both Outer (0-20) AND inner (5-15).
+					// Must be attributed to inner (smallest span), not outer.
+					{Range: []int32{8, 2, 8, 8}, Symbol: target, SymbolRoles: 0},
+				},
+			},
+		},
+	}
+
+	gp, err := scip.Parse(writeIndex(t, idx), "repo")
+	require.NoError(t, err)
+
+	require.Len(t, gp.Edges, 1, "expected exactly one edge from innermost def")
+	e := gp.Edges[0]
+	assert.Equal(t, "scip:go:"+inner, e.From,
+		"edge must originate from innermost def (inner closure), not outer")
+	assert.Equal(t, "scip:go:"+target, e.To)
+}
+
+// TestEnclosingDefMalformedRefRange verifies finding 4: a ref with empty or
+// single-element Range must not produce a spurious edge (refLine=0 must not
+// accidentally match the first def).
+func TestEnclosingDefMalformedRefRange(t *testing.T) {
+	const (
+		symA   = "go 1.0 `main`/FirstFn()."
+		symB   = "go 1.0 `main`/Other()."
+		symExt = "go 1.0 `pkg`/Ext()."
+	)
+	idx := &scipbindings.Index{
+		Documents: []*scipbindings.Document{
+			{
+				RelativePath: "malformed.go",
+				Language:     "go",
+				Symbols: []*scipbindings.SymbolInformation{
+					{Symbol: symA, Kind: scipbindings.SymbolInformation_Function, DisplayName: "FirstFn"},
+					{Symbol: symB, Kind: scipbindings.SymbolInformation_Function, DisplayName: "Other"},
+				},
+				Occurrences: []*scipbindings.Occurrence{
+					// FirstFn body: lines 0-10 (starts at line 0).
+					{
+						Range:          []int32{0, 5, 0, 12},
+						EnclosingRange: []int32{0, 0, 10, 0},
+						Symbol:         symA,
+						SymbolRoles:    int32(scipbindings.SymbolRole_Definition),
+					},
+					// Other body: lines 15-25.
+					{
+						Range:          []int32{15, 5, 15, 10},
+						EnclosingRange: []int32{15, 0, 25, 0},
+						Symbol:         symB,
+						SymbolRoles:    int32(scipbindings.SymbolRole_Definition),
+					},
+					// Malformed ref: empty Range - should be silently dropped, NOT
+					// attributed to FirstFn because refLine=0 would fall in lines 0-10.
+					{Range: []int32{}, Symbol: symExt, SymbolRoles: 0},
+					// Malformed ref: single-element Range.
+					{Range: []int32{0}, Symbol: symExt, SymbolRoles: 0},
+				},
+			},
+		},
+	}
+
+	gp, err := scip.Parse(writeIndex(t, idx), "repo")
+	require.NoError(t, err)
+	assert.Empty(t, gp.Edges, "malformed ref ranges must not produce spurious edges")
+}
+
+// TestTypeResolvedEdgeIsExtracted verifies finding 5: a SCIP type-resolved
+// edge must use ConfidenceScore=1.0 -> TierExtracted, not 0.98 -> TierInferred.
+func TestTypeResolvedEdgeIsExtracted(t *testing.T) {
+	const (
+		symA = "go 1.0 `main`/Caller()."
+		symB = "go 1.0 `main`/Callee()."
+	)
+	idx := &scipbindings.Index{
+		Documents: []*scipbindings.Document{
+			{
+				RelativePath: "tier.go",
+				Language:     "go",
+				Symbols: []*scipbindings.SymbolInformation{
+					{Symbol: symA, Kind: scipbindings.SymbolInformation_Function, DisplayName: "Caller"},
+					{Symbol: symB, Kind: scipbindings.SymbolInformation_Function, DisplayName: "Callee"},
+				},
+				Occurrences: []*scipbindings.Occurrence{
+					{
+						Range:          []int32{0, 5, 0, 11},
+						EnclosingRange: []int32{0, 0, 10, 0},
+						Symbol:         symA,
+						SymbolRoles:    int32(scipbindings.SymbolRole_Definition),
+					},
+					{
+						Range:          []int32{15, 5, 15, 11},
+						EnclosingRange: []int32{15, 0, 25, 0},
+						Symbol:         symB,
+						SymbolRoles:    int32(scipbindings.SymbolRole_Definition),
+					},
+					{Range: []int32{3, 0, 3, 6}, Symbol: symB, SymbolRoles: 0},
+				},
+			},
+		},
+	}
+
+	gp, err := scip.Parse(writeIndex(t, idx), "repo")
+	require.NoError(t, err)
+	require.Len(t, gp.Edges, 1)
+	e := gp.Edges[0]
+	assert.InDelta(t, 1.0, e.ConfidenceScore, 1e-9,
+		"type-resolved SCIP edge must have ConfidenceScore=1.0 (compiler-grade)")
+	assert.Equal(t, contract.TierExtracted, e.ConfidenceTier,
+		"type-resolved SCIP edge must be TierExtracted, not TierInferred")
+}
+
+// TestSCIPEmitsNoSymbolRows verifies findings 1, 2, 6: SCIP must not emit any
+// SymbolRows (provides or requires). Cross-repo moniker emission is deferred to
+// ROADMAP; emitting raw SCIP symbol strings clobbers AST rows and never joins
+// with AST provides/requires in the server join query.
+func TestSCIPEmitsNoSymbolRows(t *testing.T) {
+	const (
+		symLocal = "go 1.0 `pkg`/Local()."
+		symExt   = "go 1.0 `other`/External()."
+	)
+	idx := &scipbindings.Index{
+		ExternalSymbols: []*scipbindings.SymbolInformation{
+			{Symbol: symExt, Kind: scipbindings.SymbolInformation_Function, DisplayName: "External"},
+		},
+		Documents: []*scipbindings.Document{
+			{
+				RelativePath: "sym.go",
+				Language:     "go",
+				Symbols: []*scipbindings.SymbolInformation{
+					{Symbol: symLocal, Kind: scipbindings.SymbolInformation_Function, DisplayName: "Local"},
+				},
+				Occurrences: []*scipbindings.Occurrence{
+					{
+						Range:          []int32{0, 5, 0, 10},
+						EnclosingRange: []int32{0, 0, 8, 0},
+						Symbol:         symLocal,
+						SymbolRoles:    int32(scipbindings.SymbolRole_Definition),
+					},
+					// Reference to external symbol -> would previously emit a requires row.
+					{Range: []int32{3, 0, 3, 8}, Symbol: symExt, SymbolRoles: 0},
+				},
+			},
+		},
+	}
+
+	gp, err := scip.Parse(writeIndex(t, idx), "repo")
+	require.NoError(t, err)
+	assert.Empty(t, gp.Symbols,
+		"SCIP must not emit any SymbolRows (cross-repo monikers deferred to ROADMAP)")
 }
 
 // TestEmptyRelativePathSkipped verifies finding 11: documents with empty
