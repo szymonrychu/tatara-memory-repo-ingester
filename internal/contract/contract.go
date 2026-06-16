@@ -128,12 +128,14 @@ type BulkMemoriesRequest struct {
 
 // IngestJob is the /memories:bulk and /ingest-jobs/{id} response.
 type IngestJob struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
-	Total  int    `json:"total"`
-	Done   int    `json:"done"`
-	Failed int    `json:"failed"`
-	Errors []struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	Total     int    `json:"total"`
+	Done      int    `json:"done"`
+	Failed    int    `json:"failed"`
+	CreatedAt string `json:"created_at,omitempty"` // RFC3339; server-assigned
+	UpdatedAt string `json:"updated_at,omitempty"` // RFC3339; server-assigned
+	Errors    []struct {
 		IdempotencyKey string `json:"idempotency_key"`
 		Error          string `json:"error"`
 	} `json:"errors,omitempty"`
