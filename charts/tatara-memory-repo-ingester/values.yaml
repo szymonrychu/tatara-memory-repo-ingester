@@ -1,6 +1,9 @@
 nameOverride: ""
 fullnameOverride: ""
 
+ttlSecondsAfterFinished: 3600
+activeDeadlineSeconds: 7200
+
 image:
   repository: "harbor.szymonrichert.pl/containers/tatara-memory-repo-ingester"
   tag: ""

@@ -2,12 +2,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "tatara-memory-repo-ingester.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tatara-memory-repo-ingester.labels" . | nindent 4 }}
 data:
-  BASE_URL: {{ .Values.baseUrl | quote }}
-  OIDC_ISSUER: {{ .Values.oidcIssuer | quote }}
-  OIDC_CLIENT_ID: {{ .Values.oidcClientId | quote }}
-  OIDC_AUDIENCE: {{ .Values.oidcAudience | quote }}
-  REPO_NAME: {{ .Values.repoName | quote }}
-  REPO_ROOT: {{ .Values.repoRoot | quote }}
+  {{- include "tatara-memory-repo-ingester.envConfig" . | nindent 2 }}
