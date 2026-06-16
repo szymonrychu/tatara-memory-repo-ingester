@@ -909,6 +909,53 @@ func TestRunAnalyzerFailureDoesNotPurgeFiles(t *testing.T) {
 		"file whose analyzer failed must NOT be in reconcile_files (would purge chunks with no replacement)")
 }
 
+// TestRunHardAnalyzerErrorFailsClosed verifies the fail-closed gate: when an
+// analyzer hard-errors (whole-batch failure, not a per-file soft error), run must
+// return a non-nil error and must NOT push a partial graph or chunks. We force a
+// hard error with a pre-cancelled context: the Python analyzer returns
+// "analyze cancelled" from its file loop, which trips the incomplete gate.
+func TestRunHardAnalyzerErrorFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	for _, a := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
+		c := exec.Command("git", a...)
+		c.Dir = dir
+		require.NoError(t, c.Run())
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "app.py"),
+		[]byte("def hello():\n    pass\n"), 0o644))
+	base := commitAll(t, dir, "init")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "app.py"),
+		[]byte("def hello():\n    return 42\n"), 0o644))
+	commitAll(t, dir, "modify app.py")
+
+	var graphPushes, chunkPushes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph:bulk":
+			graphPushes.Add(1)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		case "/memories:bulk":
+			chunkPushes.Add(1)
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		default:
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel: the Python analyzer hard-errors with "analyze cancelled"
+
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, since: base}
+	err := run(ctx, opts, http.DefaultClient)
+	require.Error(t, err, "a hard analyzer error must fail the run (fail-closed)")
+	require.Contains(t, err.Error(), "ingest incomplete")
+	require.Zero(t, graphPushes.Load(), "no graph push when the graph is known-incomplete")
+	require.Zero(t, chunkPushes.Load(), "no chunk push when the graph is known-incomplete")
+}
+
 // TestRunTouchedDeduplicatedForRenames verifies finding 4: when two different
 // renames share the same old or new path (edge case) or any duplication occurs,
 // the code-graph Files and reconcile_files must not contain duplicate entries.
