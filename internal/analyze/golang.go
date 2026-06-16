@@ -136,6 +136,7 @@ func (g goAnalyzer) Analyze(ctx context.Context, repoRoot string, files []string
 			res.Chunks = append(res.Chunks, fallbackRes.Chunks...)
 			res.Symbols = append(res.Symbols, fallbackRes.Symbols...)
 			res.ParseErrors += fallbackRes.ParseErrors
+			res.FailedFiles = append(res.FailedFiles, fallbackRes.FailedFiles...)
 			continue
 		}
 		g.processPackage(pkg, pkgPaths, absRepoRoot, scope, modulePath, &res)

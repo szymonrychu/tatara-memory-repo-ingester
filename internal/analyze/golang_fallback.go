@@ -46,6 +46,7 @@ func fallbackAnalyzeGoPackage(
 		src, err := os.ReadFile(absPath) //nolint:gosec
 		if err != nil {
 			log.Warn("fallback: cannot read file", slog.String("file", rel), slog.String("err", err.Error()))
+			res.FailedFiles = append(res.FailedFiles, rel)
 			continue
 		}
 		// Use context.Background() here: the fallback is called from goAnalyzer.Analyze
@@ -54,6 +55,7 @@ func fallbackAnalyzeGoPackage(
 		if err != nil {
 			log.Warn("fallback: tree-sitter parse error", slog.String("file", rel), slog.String("err", err.Error()))
 			res.ParseErrors++
+			res.FailedFiles = append(res.FailedFiles, rel)
 			continue
 		}
 		pkgPath := fallbackPkgPath(modulePath, absRepoRoot, absPath)

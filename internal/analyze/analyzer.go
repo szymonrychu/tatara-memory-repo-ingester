@@ -46,6 +46,11 @@ type Result struct {
 	// that were WARNed and skipped inside the analyzer. Callers should accumulate
 	// this value and feed it to the AnalyzerParseErrorsTotal metric.
 	ParseErrors int
+	// FailedFiles lists the repo-relative diff-set paths whose read or parse failed
+	// (and were skipped without aborting the batch). The caller MUST exclude these
+	// from the reconcile set so existing chunks are not purged with no replacement.
+	// Only diff-set files appear here; repo-index-only read failures are irrelevant.
+	FailedFiles []string
 }
 
 // Analyzer extracts a code graph and chunks for one language/file class.

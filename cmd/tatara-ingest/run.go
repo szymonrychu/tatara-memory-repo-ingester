@@ -137,6 +137,12 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 		if res.ParseErrors > 0 {
 			m.AnalyzerParseErrorsTotal.WithLabelValues(a.Name()).Add(float64(res.ParseErrors))
 		}
+		// Per-file read/parse failures: the analyzer skipped these (no replacement
+		// chunks produced) but did not abort the batch. They must be excluded from
+		// reconcile so the server does not purge their existing chunks.
+		for _, f := range res.FailedFiles {
+			failedFiles[f] = struct{}{}
+		}
 		slog.Info("analyzer complete",
 			"analyzer", a.Name(),
 			"files", len(fs),

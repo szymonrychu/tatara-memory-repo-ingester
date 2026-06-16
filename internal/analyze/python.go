@@ -72,6 +72,7 @@ func (p pythonAnalyzer) Analyze(ctx context.Context, repoRoot string, files []st
 			p.log.Warn("python: read failed; skipping", slog.String("file", relPath), slog.String("err", err.Error()))
 			if diffSet[relPath] {
 				res.ParseErrors++
+				res.FailedFiles = append(res.FailedFiles, relPath)
 			}
 			continue
 		}
@@ -80,6 +81,7 @@ func (p pythonAnalyzer) Analyze(ctx context.Context, repoRoot string, files []st
 			p.log.Warn("tree-sitter parse error", slog.String("file", relPath), slog.String("err", err.Error()))
 			if diffSet[relPath] {
 				res.ParseErrors++
+				res.FailedFiles = append(res.FailedFiles, relPath)
 			}
 			continue
 		}

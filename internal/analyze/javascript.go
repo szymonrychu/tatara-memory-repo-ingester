@@ -69,6 +69,7 @@ func (j jsAnalyzer) Analyze(ctx context.Context, repoRoot string, files []string
 			j.log.Warn("javascript: read failed; skipping", slog.String("file", relPath), slog.String("err", err.Error()))
 			if diffSet[relPath] {
 				res.ParseErrors++
+				res.FailedFiles = append(res.FailedFiles, relPath)
 			}
 			continue
 		}
@@ -77,6 +78,7 @@ func (j jsAnalyzer) Analyze(ctx context.Context, repoRoot string, files []string
 			j.log.Warn("tree-sitter parse error", slog.String("file", relPath), slog.String("err", err.Error()))
 			if diffSet[relPath] {
 				res.ParseErrors++
+				res.FailedFiles = append(res.FailedFiles, relPath)
 			}
 			continue
 		}

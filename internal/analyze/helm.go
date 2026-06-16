@@ -122,6 +122,15 @@ func (ha *helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 		if err := sigsyaml.Unmarshal(rawChart, &manifest); err != nil {
 			ha.log.Warn("helm: cannot parse Chart.yaml", "path", chartYAMLPath, "err", err)
 			res.ParseErrors++
+			// Only a Chart.yaml that is itself in the diff must be excluded from
+			// reconcile; a repo-context Chart.yaml read for chart-name resolution
+			// is not a diff file and must not poison the reconcile set.
+			for _, f := range cfiles {
+				if filepath.ToSlash(f) == chartYAMLPath {
+					res.FailedFiles = append(res.FailedFiles, chartYAMLPath)
+					break
+				}
+			}
 			continue
 		}
 		chartName := manifest.Name
@@ -189,6 +198,7 @@ func (ha *helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 				if err := sigsyaml.Unmarshal(rawValues, &flat); err != nil {
 					ha.log.Warn("helm: cannot parse values.yaml", "path", valuesPath, "err", err)
 					res.ParseErrors++
+					res.FailedFiles = append(res.FailedFiles, valuesPath)
 					break
 				}
 				// Sort keys for deterministic output (finding 10).
@@ -244,6 +254,7 @@ func (ha *helmAnalyzer) processTemplate(repoRoot, relPath, chartName string, res
 	if err != nil {
 		ha.log.Warn("helm: cannot parse template", "path", relPath, "err", err)
 		res.ParseErrors++
+		res.FailedFiles = append(res.FailedFiles, relPath)
 		return
 	}
 
