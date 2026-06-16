@@ -316,6 +316,23 @@ func TestParseFragmentValidFilesNilAcceptsAll(t *testing.T) {
 	require.Equal(t, "any/path.go", res.Edges[0].SrcFile)
 }
 
+// TestParseFragmentFiltersHallucinatedHyperedgeSrcFile asserts that hyperedges
+// whose source_file is not in validFiles are dropped, mirroring the edge guard.
+// The server rejects the entire push if any hyperedge src_file is not in Files,
+// so a hallucinated or empty path must not survive.
+func TestParseFragmentFiltersHallucinatedHyperedgeSrcFile(t *testing.T) {
+	frag := `{"nodes":[],"edges":[],"hyperedges":[
+	  {"id":"h1","label":"Good","relation":"participate_in","nodes":["a","b","c"],"source_file":"real/file.go"},
+	  {"id":"h2","label":"Bad","relation":"participate_in","nodes":["d","e","f"],"source_file":"hallucinated/path.go"},
+	  {"id":"h3","label":"Empty","relation":"participate_in","nodes":["g","h","i"],"source_file":""}
+	]}`
+	valid := map[string]struct{}{"real/file.go": {}}
+	res, err := ParseFragment("r", []byte(frag), valid)
+	require.NoError(t, err)
+	require.Len(t, res.Hyperedges, 1, "only the hyperedge with a valid src_file must survive")
+	require.Equal(t, "real/file.go", res.Hyperedges[0].SrcFile)
+}
+
 // TestConceptIDEmptySlug asserts that nodes with punctuation-only labels get
 // distinct, non-empty ids rather than colliding on 'concept:<repo>:'
 // (finding 3: slugLabel returns ” for labels with no [a-z0-9] runes).

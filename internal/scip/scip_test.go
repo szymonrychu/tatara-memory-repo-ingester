@@ -856,6 +856,54 @@ func TestExternalSymbolEdgeHasEntity(t *testing.T) {
 		"entity for external symbol must be emitted to prevent dangling edge")
 }
 
+// TestCrossDocPlaceholderVsRealDef guards against a regression in the dangling-edge
+// placeholder fix: a symbol referenced in one document and DEFINED in another must
+// yield exactly one entity (the real definition), never a scip_external placeholder
+// duplicate that would clobber the real row on the server reconcile.
+func TestCrossDocPlaceholderVsRealDef(t *testing.T) {
+	const (
+		symCaller = "go 1.0 `a`/Caller()."
+		symX      = "go 1.0 `b`/X()."
+	)
+	idx := &scipbindings.Index{
+		Documents: []*scipbindings.Document{
+			{
+				RelativePath: "a.go",
+				Language:     "go",
+				Symbols: []*scipbindings.SymbolInformation{
+					{Symbol: symCaller, Kind: scipbindings.SymbolInformation_Function, DisplayName: "Caller"},
+				},
+				Occurrences: []*scipbindings.Occurrence{
+					{Range: []int32{0, 5, 0, 11}, EnclosingRange: []int32{0, 0, 8, 0}, Symbol: symCaller, SymbolRoles: int32(scipbindings.SymbolRole_Definition)},
+					{Range: []int32{3, 0, 3, 5}, Symbol: symX, SymbolRoles: 0},
+				},
+			},
+			{
+				RelativePath: "b.go",
+				Language:     "go",
+				Symbols: []*scipbindings.SymbolInformation{
+					{Symbol: symX, Kind: scipbindings.SymbolInformation_Function, DisplayName: "X"},
+				},
+				Occurrences: []*scipbindings.Occurrence{
+					{Range: []int32{0, 5, 0, 6}, EnclosingRange: []int32{0, 0, 4, 0}, Symbol: symX, SymbolRoles: int32(scipbindings.SymbolRole_Definition)},
+				},
+			},
+		},
+	}
+	gp, err := scip.Parse(writeIndex(t, idx), "repo")
+	require.NoError(t, err)
+
+	var matches []contract.Entity
+	for _, e := range gp.Entities {
+		if e.ID == "scip:go:"+symX {
+			matches = append(matches, e)
+		}
+	}
+	require.Len(t, matches, 1, "a symbol defined in one doc + referenced in another must yield exactly one entity")
+	assert.Equal(t, "scip_function", matches[0].Type, "the real definition must win over the placeholder")
+	assert.Equal(t, "b.go", matches[0].FilePath, "the surviving entity must be the real one with a FilePath")
+}
+
 // TestDuplicateDefinitionEntityDedup verifies round-2 finding 2: when a symbol
 // appears as a Definition occurrence more than once in a document, only one
 // entity row with that ID is emitted (no duplicates inflate the count).

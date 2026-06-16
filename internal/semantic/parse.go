@@ -134,6 +134,12 @@ func ParseFragment(repo string, body []byte, validFiles map[string]struct{}) (an
 		if len(h.Nodes) < 3 {
 			continue
 		}
+		// Drop hyperedges whose source_file is not in the chunk's file set: like
+		// edges, the memory server rejects the entire push if any src_file is not
+		// in Files (mirrors the edge guard above; finding 2).
+		if !inValidFiles(h.SourceFile) {
+			continue
+		}
 		// Remap members through the concept-id table, mirroring edge endpoint remapping.
 		members := make([]string, len(h.Nodes))
 		for j, m := range h.Nodes {

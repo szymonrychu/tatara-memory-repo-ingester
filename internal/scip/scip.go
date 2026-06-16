@@ -35,6 +35,18 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 		fileSet  = make(map[string]struct{})
 	)
 
+	// realEntityIDs holds every entity ID emitted from a Definition occurrence,
+	// across ALL documents. A symbol may be referenced in one document and defined
+	// in another; without a global set the per-document placeholder logic would
+	// emit a scip_external placeholder AND the real entity for the same ID,
+	// producing duplicate rows that clobber the real entity on reconcile.
+	realEntityIDs := make(map[string]struct{})
+	// placeholderCandidates collects external edge targets that had no local
+	// definition in their own document. Keyed by entity ID so cross-document
+	// duplicates collapse. Emitted after the loop, but only for IDs that never
+	// got a real entity anywhere in the index.
+	placeholderCandidates := make(map[string]contract.Entity)
+
 	// Build a top-level symInfo from Index.ExternalSymbols so that external
 	// (imported/cross-package) symbol kinds are available when classifying
 	// reference edges. Per-document Symbols are overlaid on top below.
@@ -95,6 +107,7 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 				continue
 			}
 			seenEntityIDs[eid] = struct{}{}
+			realEntityIDs[eid] = struct{}{}
 
 			// Prefer EnclosingRange for full body span; fall back to Range.
 			lineStart, lineEnd := occLineStartEnd(bestRange(d))
@@ -159,23 +172,26 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 			}
 			seenEdges[ek] = struct{}{}
 
-			// If the To entity has no local (or already-emitted placeholder) entity,
-			// emit a minimal placeholder so the edge target resolves and the graph
-			// has no dangling edges.
+			// If the To entity has no local entity in this document, record a
+			// placeholder candidate so the edge target resolves and the graph has
+			// no dangling edges. Emission is deferred to a post-loop pass that drops
+			// any candidate whose ID later (or in another document) got a real
+			// entity, preventing duplicate rows for the same ID.
 			if _, exists := seenEntityIDs[ek.to]; !exists {
-				seenEntityIDs[ek.to] = struct{}{}
-				name := lastComponent(ref.Symbol)
-				if extSI, extOK := symInfo[ref.Symbol]; extOK && extSI.DisplayName != "" {
-					name = extSI.DisplayName
+				if _, queued := placeholderCandidates[ek.to]; !queued {
+					name := lastComponent(ref.Symbol)
+					if extSI, extOK := symInfo[ref.Symbol]; extOK && extSI.DisplayName != "" {
+						name = extSI.DisplayName
+					}
+					placeholderCandidates[ek.to] = contract.Entity{
+						ID:   ek.to,
+						Name: name,
+						Type: "scip_external",
+						Properties: map[string]string{
+							"scip_kind": "external",
+						},
+					}
 				}
-				entities = append(entities, contract.Entity{
-					ID:   ek.to,
-					Name: name,
-					Type: "scip_external",
-					Properties: map[string]string{
-						"scip_kind": "external",
-					},
-				})
 			}
 
 			// SCIP type resolution is compiler-grade: use score=1.0 so edges rank
@@ -194,6 +210,21 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 				},
 			})
 		}
+	}
+
+	// Emit placeholder entities for external edge targets, but only for IDs that
+	// never got a real entity anywhere in the index. Sorted for deterministic
+	// output (the candidate map iteration order is otherwise random).
+	placeholderIDs := make([]string, 0, len(placeholderCandidates))
+	for id := range placeholderCandidates {
+		if _, real := realEntityIDs[id]; real {
+			continue
+		}
+		placeholderIDs = append(placeholderIDs, id)
+	}
+	sort.Strings(placeholderIDs)
+	for _, id := range placeholderIDs {
+		entities = append(entities, placeholderCandidates[id])
 	}
 
 	files := make([]string, 0, len(fileSet))
