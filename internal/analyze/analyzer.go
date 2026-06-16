@@ -5,6 +5,7 @@ package analyze
 
 import (
 	"context"
+	"strconv"
 
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/contract"
 )
@@ -67,6 +68,31 @@ func (r *Registry) Register(a Analyzer) { r.analyzers = append(r.analyzers, a) }
 
 // Analyzers returns the registered analyzers in order.
 func (r *Registry) Analyzers() []Analyzer { return r.analyzers }
+
+// edgeConfidence returns a properties map and the typed score+tier for a
+// given resolution constant. Use this instead of hand-rolling each site to
+// keep ConfidenceScore/ConfidenceTier and Properties["confidence"] in sync
+// across all analyzers (finding 4).
+func edgeConfidence(resolution string) (score float64, tier string, props map[string]string) {
+	score = contract.ConfidenceScoreFor(resolution)
+	tier = contract.TierForScore(score)
+	props = map[string]string{
+		"resolution": resolution,
+		"confidence": contract.ConfidenceFor(resolution),
+	}
+	return score, tier, props
+}
+
+// confidenceFromProps reads the typed score+tier back out of an already-built
+// (and possibly degraded) properties map. Used after degraded() caps confidence
+// so the typed Edge fields stay in sync with Properties["confidence"].
+func confidenceFromProps(props map[string]string) (score float64, tier string) {
+	if s, err := strconv.ParseFloat(props["confidence"], 64); err == nil {
+		score = s
+	}
+	tier = contract.TierForScore(score)
+	return score, tier
+}
 
 // Group assigns each file to the first analyzer whose Match returns true.
 // Files matched by no analyzer are dropped.

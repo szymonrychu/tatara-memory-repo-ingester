@@ -3,6 +3,8 @@
 // JSON shapes byte-for-byte; contract_shape_test.go guards against drift.
 package contract
 
+import "strconv"
+
 // Entity is a node in the code graph.
 type Entity struct {
 	ID          string            `json:"id"`
@@ -229,22 +231,29 @@ const (
 	ResUnresolved        = "unresolved"
 )
 
-// ConfidenceFor returns the prior confidence string for a resolution level.
-func ConfidenceFor(resolution string) string {
+// ConfidenceScoreFor returns the prior confidence float64 for a resolution level.
+// This is the single source of truth; ConfidenceFor derives from it.
+func ConfidenceScoreFor(resolution string) float64 {
 	switch resolution {
 	case ResTypeResolved:
-		return "0.98"
+		return 0.98
 	case ResScopedNameMatch:
-		return "0.85"
+		return 0.85
 	case ResImportedNameMatch:
-		return "0.7"
+		return 0.7
 	case ResGlobalNameMatch:
-		return "0.45"
+		return 0.45
 	case ResAmbiguousMultiDef:
-		return "0.2"
+		return 0.2
 	default:
-		return "0.0"
+		return 0.0
 	}
+}
+
+// ConfidenceFor returns the prior confidence string for a resolution level.
+func ConfidenceFor(resolution string) string {
+	s := strconv.FormatFloat(ConfidenceScoreFor(resolution), 'f', -1, 64)
+	return s
 }
 
 // Confidence tier values (typed column on code_edges; promoted from the scalar score).

@@ -48,6 +48,8 @@ func fallbackAnalyzeGoPackage(
 			log.Warn("fallback: cannot read file", slog.String("file", rel), slog.String("err", err.Error()))
 			continue
 		}
+		// Use context.Background() here: the fallback is called from goAnalyzer.Analyze
+		// which already checks ctx errors; the fallback path is package-scoped and short.
 		root, err := sitter.ParseCtx(context.Background(), src, lang)
 		if err != nil {
 			log.Warn("fallback: tree-sitter parse error", slog.String("file", rel), slog.String("err", err.Error()))
@@ -88,7 +90,11 @@ func fallbackPkgPath(modulePath, absRepoRoot, absFilePath string) string {
 }
 
 // collectFuncDefs walks a parsed source_file node and populates defs with
-// function name -> entityID for all function_declarations in the file.
+// bare function name -> entityID for function_declarations ONLY.
+// Method declarations are intentionally excluded: a method call is syntactically
+// recv.Method() (a selector expression) and walkSitterCalls already skips those.
+// Storing method names in the same map as function names would cause bare-identifier
+// call resolution to mis-target a method when both share a name (finding 9).
 func collectFuncDefs(pkgPath string, root *sitter.Node, src []byte, defs map[string]string) {
 	count := int(root.NamedChildCount())
 	for i := 0; i < count; i++ {
@@ -96,24 +102,15 @@ func collectFuncDefs(pkgPath string, root *sitter.Node, src []byte, defs map[str
 		if child == nil {
 			continue
 		}
-		switch child.Type() {
-		case "function_declaration":
-			nameNode := child.ChildByFieldName("name")
-			if nameNode == nil {
-				continue
-			}
-			name := string(src[nameNode.StartByte():nameNode.EndByte()])
-			defs[name] = "go:func:" + pkgPath + "." + name
-		case "method_declaration":
-			nameNode := child.ChildByFieldName("name")
-			recvNode := child.ChildByFieldName("receiver")
-			if nameNode == nil || recvNode == nil {
-				continue
-			}
-			name := string(src[nameNode.StartByte():nameNode.EndByte()])
-			recv := fallbackReceiverName(recvNode, src)
-			defs[name] = "go:method:" + pkgPath + ".(" + recv + ")." + name
+		if child.Type() != "function_declaration" {
+			continue
 		}
+		nameNode := child.ChildByFieldName("name")
+		if nameNode == nil {
+			continue
+		}
+		name := string(src[nameNode.StartByte():nameNode.EndByte()])
+		defs[name] = "go:func:" + pkgPath + "." + name
 	}
 }
 

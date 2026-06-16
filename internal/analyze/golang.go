@@ -334,6 +334,12 @@ func (g goAnalyzer) processPackage(
 			}
 			// Find the containing entity (func) for this ident.
 			entityID := g.containingEntity(pkg, ident.Pos(), funcs)
+			// If the ident fell outside all func boundaries we get the package
+			// entity as fallback. Ensure that entity is emitted before we reference
+			// it from a SymbolRow (finding 7).
+			if entityID == pkgID {
+				emitPkgEntityOnce()
+			}
 			key := symbol + "|" + entityID
 			if seenReq[key] {
 				continue
@@ -508,7 +514,7 @@ func (g goAnalyzer) emitCallEdges(
 		}
 		seenEdge[edgeKey] = true
 
-		score := scoreFor(contract.ResTypeResolved)
+		score := contract.ConfidenceScoreFor(contract.ResTypeResolved)
 		res.Edges = append(res.Edges, contract.Edge{
 			From:            callerID,
 			To:              calleeID,
@@ -577,22 +583,4 @@ func sourceSliceBytes(fset *token.FileSet, start, end token.Pos, src []byte) str
 		return string(src)
 	}
 	return string(src[startOff:endOff])
-}
-
-// scoreFor parses the confidence prior string for a resolution level into a float.
-func scoreFor(resolution string) float64 {
-	switch resolution {
-	case contract.ResTypeResolved:
-		return 0.98
-	case contract.ResScopedNameMatch:
-		return 0.85
-	case contract.ResImportedNameMatch:
-		return 0.7
-	case contract.ResGlobalNameMatch:
-		return 0.45
-	case contract.ResAmbiguousMultiDef:
-		return 0.2
-	default:
-		return 0.0
-	}
 }
