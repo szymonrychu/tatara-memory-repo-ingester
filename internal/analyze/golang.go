@@ -187,6 +187,20 @@ func (g goAnalyzer) processPackage(
 		})
 	}
 
+	// fileCache avoids re-reading the same source file for every func it contains.
+	fileCache := make(map[string][]byte)
+	cachedReadFile := func(absFilePath string) []byte {
+		if b, ok := fileCache[absFilePath]; ok {
+			return b
+		}
+		b, err := osReadFile(absFilePath) //nolint:gosec
+		if err != nil {
+			b = nil
+		}
+		fileCache[absFilePath] = b
+		return b
+	}
+
 	var funcs []goFuncInfo
 
 	for _, file := range pkg.Syntax {
@@ -255,8 +269,9 @@ func (g goAnalyzer) processPackage(
 				SrcFile:  rel,
 			})
 
-			// Chunk
-			body := sourceSlice(pkg.Fset, fd.Pos(), fd.End(), absFilePath)
+			// Chunk: slice from cached bytes to avoid redundant disk reads.
+			src := cachedReadFile(absFilePath)
+			body := sourceSliceBytes(pkg.Fset, fd.Pos(), fd.End(), src)
 			header := fmt.Sprintf("[%s] %s\nfile: %s\npackage: %s\nsignature: %s",
 				entityType, entityID, rel, pkg.PkgPath, sig)
 			res.Chunks = append(res.Chunks, contract.Chunk{
@@ -550,12 +565,12 @@ func repoRelPath(absRepoRoot, absFilePath string) string {
 	return rel
 }
 
-// sourceSlice reads the source bytes for the range [start,end) from the named file.
-func sourceSlice(fset *token.FileSet, start, end token.Pos, filename string) string {
-	src, err := os.ReadFile(filename) //nolint:gosec
-	if err != nil {
-		return ""
-	}
+// osReadFile is the os.ReadFile implementation used by this package.
+// Tests may replace it to intercept reads.
+var osReadFile = os.ReadFile //nolint:gosec
+
+// sourceSliceBytes returns the source substring [start,end) from pre-loaded bytes.
+func sourceSliceBytes(fset *token.FileSet, start, end token.Pos, src []byte) string {
 	startOff := fset.Position(start).Offset
 	endOff := fset.Position(end).Offset
 	if startOff < 0 || endOff > len(src) || startOff >= endOff {
