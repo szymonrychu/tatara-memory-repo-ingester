@@ -2,6 +2,7 @@ package analyze_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -270,4 +271,90 @@ func TestPythonDegradedByDecorator(t *testing.T) {
 	degradedBy := edge.Properties["degraded_by"]
 	require.True(t, strings.Contains(degradedBy, "decorator"),
 		"degraded_by must contain 'decorator', got %q", degradedBy)
+}
+
+// TestPythonIncrementalIngestCrossFileEdge: finding 1 - when only uses_import.py is in `files`
+// but helper.py exists in repoRoot, the cross-file call edge must still resolve because the
+// full-repo index is built from all .py files in repoRoot, not just the diff set.
+func TestPythonIncrementalIngestCrossFileEdge(t *testing.T) {
+	a := analyze.NewPython()
+
+	// Only the changed file is in the diff set (incremental ingest scenario).
+	res, err := a.Analyze(context.Background(), "testdata/py", []string{"pkg/uses_import.py"})
+	require.NoError(t, err)
+
+	// caller() calls helped() which is defined in pkg/helper.py (NOT in the diff set).
+	// The cross-file edge must resolve via the repo-wide index built from all .py files.
+	edge, ok := findEdge(res.Edges, contract.RelCalls,
+		"py:func:pkg.uses_import.caller", "py:func:pkg.helper.helped")
+	require.True(t, ok, "expected caller->helped imported_name_match edge even when helper.py is outside the diff set (incremental ingest)")
+	require.Equal(t, contract.ResImportedNameMatch, edge.Properties["resolution"])
+}
+
+// TestPythonRelativeImportNoEmptySymbol: finding 2 - relative imports must NOT emit a requires
+// SymbolRow with an empty symbol="".
+func TestPythonRelativeImportNoEmptySymbol(t *testing.T) {
+	a := analyze.NewPython()
+
+	res, err := a.Analyze(context.Background(), "testdata/py", []string{"pkg/rel_import.py"})
+	require.NoError(t, err)
+
+	for _, s := range res.Symbols {
+		require.NotEmpty(t, s.Symbol,
+			"requires SymbolRow with empty symbol emitted (relative import leak): %+v", s)
+	}
+}
+
+// TestPythonImportedClassResolves: finding 3 - `from pkg.class_def import MyService` must
+// resolve MyService as py:class:... and create a calls edge at imported_name_match tier.
+func TestPythonImportedClassResolves(t *testing.T) {
+	a := analyze.NewPython()
+
+	// Both files in scope so repoIndex has MyService.
+	res, err := a.Analyze(context.Background(), "testdata/py", []string{"pkg/class_def.py", "pkg/uses_class.py"})
+	require.NoError(t, err)
+
+	// py:class:pkg.class_def.MyService must exist.
+	ids := map[string]bool{}
+	for _, e := range res.Entities {
+		ids[e.ID] = true
+	}
+	require.True(t, ids["py:class:pkg.class_def.MyService"], "expected py:class entity for MyService")
+
+	// factory() calls MyService() - must resolve as imported_name_match not dangling.
+	edge, ok := findEdge(res.Edges, contract.RelCalls,
+		"py:func:pkg.uses_class.factory", "py:class:pkg.class_def.MyService")
+	require.True(t, ok, "expected factory->MyService imported_name_match edge (class import resolution)")
+	require.Equal(t, contract.ResImportedNameMatch, edge.Properties["resolution"])
+}
+
+// TestPythonDegradedNumericConfidenceCap: finding 4 - degraded() must use numeric comparison
+// so that any prior string like "0.125" is correctly capped (lexicographically "0.125" < "0.45"
+// is true so the bug would NOT cap it, but numerically it SHOULD be capped to 0.45 for priors
+// below the threshold this function enforces). More importantly, "0.5" > "0.45" both ways,
+// so the key risk is a prior like "0.85" emitted as a string must produce "0.45".
+// We verify the existing decorated case and also verify that a known-high confidence value
+// is always capped correctly regardless of string representation quirks.
+func TestPythonDegradedNumericConfidenceCap(t *testing.T) {
+	a := analyze.NewPython()
+
+	res, err := a.Analyze(context.Background(), "testdata/py", allPyFiles)
+	require.NoError(t, err)
+
+	// All decorated calls must have confidence <= 0.45 as a float.
+	for _, e := range res.Edges {
+		if e.Relation != contract.RelCalls {
+			continue
+		}
+		if strings.Contains(e.Properties["degraded_by"], "decorator") {
+			conf := e.Properties["confidence"]
+			require.NotEmpty(t, conf, "degraded edge must have confidence set")
+			// Ensure it parses as a float and is <= 0.45.
+			var f float64
+			_, err := fmt.Sscanf(conf, "%f", &f)
+			require.NoError(t, err, "confidence %q must be a valid float", conf)
+			require.LessOrEqual(t, f, 0.45,
+				"decorated call edge confidence %q exceeds cap 0.45", conf)
+		}
+	}
 }

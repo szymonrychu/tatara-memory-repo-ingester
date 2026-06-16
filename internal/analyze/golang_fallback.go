@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
@@ -356,10 +357,12 @@ func emitFallbackCallEdges(
 		seenEdge[key] = true
 
 		// Use scoped_name_match but always cap at 0.45 for the fallback.
+		// Use numeric comparison to avoid lexicographic ordering bugs.
+		const cap = 0.45
 		rawConf := contract.ConfidenceFor(contract.ResScopedNameMatch)
 		conf := rawConf
-		if conf > "0.45" {
-			conf = "0.45"
+		if v, err := strconv.ParseFloat(rawConf, 64); err != nil || v > cap {
+			conf = strconv.FormatFloat(cap, 'f', -1, 64)
 		}
 
 		res.Edges = append(res.Edges, contract.Edge{

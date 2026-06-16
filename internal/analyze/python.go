@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
@@ -33,10 +34,12 @@ func (p pythonAnalyzer) Match(path string) bool {
 }
 
 // Analyze parses each file with tree-sitter and emits entities, edges, and chunks.
+// The repo-wide resolution index is built from ALL .py files found under repoRoot so that
+// incremental ingest (where `files` is a diff subset) still resolves cross-file call edges.
+// Entities, edges, and chunks are only emitted for files in `files`.
 func (p pythonAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) (Result, error) {
 	lang := python.GetLanguage()
 
-	// First pass: parse every file and collect per-file AST + src for the repo-wide index.
 	type parsedFile struct {
 		relPath   string
 		moduleFQN string
@@ -46,8 +49,20 @@ func (p pythonAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 	}
 	var res Result
 
-	parsed := make([]parsedFile, 0, len(files))
-	for _, relPath := range files {
+	// Collect all .py files in repoRoot for building the repo-wide index.
+	allPyFiles, err := walkLang(repoRoot, ".py")
+	if err != nil {
+		return Result{}, fmt.Errorf("walk repo for .py files: %w", err)
+	}
+
+	// Parse all repo files to populate the repo-wide name->entityID index.
+	diffSet := make(map[string]bool, len(files))
+	for _, f := range files {
+		diffSet[f] = true
+	}
+
+	allParsed := make([]parsedFile, 0, len(allPyFiles))
+	for _, relPath := range allPyFiles {
 		absPath := filepath.Join(repoRoot, relPath)
 		src, err := os.ReadFile(absPath) //nolint:gosec
 		if err != nil {
@@ -56,11 +71,13 @@ func (p pythonAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 		root, err := sitter.ParseCtx(context.Background(), src, lang)
 		if err != nil {
 			p.log.Warn("tree-sitter parse error", slog.String("file", relPath), slog.String("err", err.Error()))
-			res.ParseErrors++
+			if diffSet[relPath] {
+				res.ParseErrors++
+			}
 			continue
 		}
 		moduleFQN := pathToFQN(relPath)
-		parsed = append(parsed, parsedFile{
+		allParsed = append(allParsed, parsedFile{
 			relPath:   relPath,
 			moduleFQN: moduleFQN,
 			src:       src,
@@ -69,29 +86,45 @@ func (p pythonAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 		})
 	}
 
-	// Build repo-wide name -> []entityID index from all parsed files.
-	// Used for global_name_match and ambiguous_multi_def resolution.
+	// Build repo-wide name -> []entityID index from ALL parsed files.
 	repoIndex := map[string][]string{}
-	for _, pf := range parsed {
+	for _, pf := range allParsed {
 		for name, id := range pf.defs {
 			repoIndex[name] = append(repoIndex[name], id)
 		}
 	}
 
-	for _, pf := range parsed {
-		// Reuse the cached module-level def map (scoped resolution).
+	// Emit entities/edges/chunks only for files in the diff set.
+	for _, pf := range allParsed {
+		if !diffSet[pf.relPath] {
+			continue
+		}
 		moduleDefs := pf.defs
-
-		// Build import map: local name -> entityID resolved via tracked imports.
 		importMap := pyImportMap(pf.root, pf.src, repoIndex)
-
-		// Collect unresolved external imports for requires SymbolRows.
 		extImports := pyExternalImports(pf.root, pf.src, repoIndex)
-
 		p.processFile(pf.relPath, pf.moduleFQN, pf.src, pf.root, moduleDefs, importMap, extImports, repoIndex, &res)
 	}
 
 	return res, nil
+}
+
+// walkLang returns all repo-relative file paths under root with the given suffix.
+func walkLang(root, suffix string) ([]string, error) {
+	var out []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), suffix) {
+			rel, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				return relErr
+			}
+			out = append(out, rel)
+		}
+		return nil
+	})
+	return out, err
 }
 
 // pathToFQN converts a repo-relative path like "pkg/mod.py" to "pkg.mod".
@@ -128,6 +161,8 @@ func pyFileDefs(moduleFQN string, root *sitter.Node, src []byte) map[string]stri
 			className := child.ChildByFieldName("name")
 			if className != nil {
 				cname := className.Content(src)
+				// Register the class itself so pyMatchImport can resolve imported classes.
+				defs[cname] = "py:class:" + moduleFQN + "." + cname
 				body := child.ChildByFieldName("body")
 				if body != nil {
 					bc := int(body.NamedChildCount())
@@ -167,6 +202,10 @@ func pyImportMap(root *sitter.Node, src []byte, repoIndex map[string][]string) m
 			if moduleName == "" {
 				continue
 			}
+			// Relative imports (leading dot) cannot resolve to absolute entity IDs; skip.
+			if strings.HasPrefix(moduleName, ".") || modNode.Type() == "relative_import" {
+				continue
+			}
 			// Convert "pkg.helper" -> "pkg.helper"
 			moduleFQN := moduleName
 
@@ -189,24 +228,14 @@ func pyImportMap(root *sitter.Node, src []byte, repoIndex map[string][]string) m
 					}
 					importedName := nameField.Content(src)
 					aliasName := aliasField.Content(src)
-					candidateID := "py:func:" + moduleFQN + "." + importedName
-					ids := repoIndex[importedName]
-					for _, id := range ids {
-						if id == candidateID {
-							imports[aliasName] = candidateID
-							break
-						}
+					if id, ok := pyMatchImport(moduleFQN, importedName, repoIndex); ok {
+						imports[aliasName] = id
 					}
 				default:
 					// dotted_name or identifier: plain name import.
 					localName := n.Content(src)
-					candidateID := "py:func:" + moduleFQN + "." + localName
-					ids := repoIndex[localName]
-					for _, id := range ids {
-						if id == candidateID {
-							imports[localName] = candidateID
-							break
-						}
+					if id, ok := pyMatchImport(moduleFQN, localName, repoIndex); ok {
+						imports[localName] = id
 					}
 				}
 			}
@@ -219,6 +248,21 @@ func pyImportMap(root *sitter.Node, src []byte, repoIndex map[string][]string) m
 		}
 	}
 	return imports
+}
+
+// pyMatchImport looks up importedName in repoIndex and returns the entity ID from
+// moduleFQN that matches, regardless of kind prefix (py:func: or py:class:).
+// This ensures imported classes resolve as imported_name_match alongside functions.
+func pyMatchImport(moduleFQN, importedName string, repoIndex map[string][]string) (string, bool) {
+	suffix := "." + importedName
+	for _, id := range repoIndex[importedName] {
+		// Accept any entity whose FQN ends with moduleFQN.importedName, ignoring the kind prefix.
+		// Entity IDs follow the pattern "py:<kind>:<moduleFQN>.<name>".
+		if strings.HasSuffix(id, moduleFQN+suffix) {
+			return id, true
+		}
+	}
+	return "", false
 }
 
 // processFile emits all entities, edges, and chunks for one Python file.
@@ -349,7 +393,15 @@ func pyExternalImports(root *sitter.Node, src []byte, repoIndex map[string][]str
 				continue
 			}
 			modName := modNode.Content(src)
+			// Relative imports (from . import x, from .helper import y) have a leading dot.
+			// Their top-level split yields "" which must not be emitted as an external symbol.
+			if strings.HasPrefix(modName, ".") || modNode.Type() == "relative_import" {
+				continue
+			}
 			topLevel := strings.SplitN(modName, ".", 2)[0]
+			if topLevel == "" {
+				continue
+			}
 			// Check if any name imported from this module resolves in repoIndex.
 			// If the module itself (top-level) has no repo entity, it's external.
 			if len(repoIndex[topLevel]) == 0 && !seen[topLevel] {
@@ -609,17 +661,19 @@ func (p pythonAnalyzer) emitFunc(
 	}
 }
 
-// degraded returns a copy of props with confidence capped at "0.45" and
+// degraded returns a copy of props with confidence capped at 0.45 (numeric) and
 // degraded_by set (comma-joined if already present).
 func degraded(props map[string]string, reason string) map[string]string {
 	out := make(map[string]string, len(props)+1)
 	for k, v := range props {
 		out[k] = v
 	}
-	// Cap confidence at 0.45.
+	// Cap confidence at 0.45 using numeric comparison to avoid lexicographic ordering bugs.
+	const cap = 0.45
 	conf := out["confidence"]
-	if conf == "" || conf > "0.45" {
-		out["confidence"] = "0.45"
+	v, err := strconv.ParseFloat(conf, 64)
+	if err != nil || v > cap {
+		out["confidence"] = strconv.FormatFloat(cap, 'f', -1, 64)
 	}
 	// Append reason to degraded_by.
 	if existing, ok := out["degraded_by"]; ok && existing != "" {

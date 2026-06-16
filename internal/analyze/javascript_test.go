@@ -258,6 +258,46 @@ func TestJavaScriptAnalyzer_NoDuplicateCallEdges(t *testing.T) {
 	require.Equal(t, 1, count, "expected exactly 1 calls edge from caller->target, got %d", count)
 }
 
+// TestJavaScriptAnalyzer_ImportedClassResolves: finding 3 - importing a class from another module
+// must resolve as imported_name_match (not fall through to global or dangling).
+func TestJavaScriptAnalyzer_ImportedClassResolves(t *testing.T) {
+	a := analyze.NewJavaScript()
+
+	files := []string{"src/service_def.js", "src/uses_class.js"}
+	res, err := a.Analyze(context.Background(), "testdata/js", files)
+	require.NoError(t, err)
+
+	// js:class:src/service_def.js::ServiceClass must exist.
+	ids := map[string]bool{}
+	for _, e := range res.Entities {
+		ids[e.ID] = true
+	}
+	require.True(t, ids["js:class:src/service_def.js::ServiceClass"], "expected js:class entity for ServiceClass")
+
+	// factory() calls ServiceClass() - must resolve as imported_name_match not dangling.
+	edge, ok := findEdge(res.Edges, contract.RelCalls,
+		"js:func:src/uses_class.js::factory", "js:class:src/service_def.js::ServiceClass")
+	require.True(t, ok, "expected factory->ServiceClass imported_name_match edge (class import resolution)")
+	require.Equal(t, contract.ResImportedNameMatch, edge.Properties["resolution"])
+}
+
+// TestJavaScriptAnalyzer_IncrementalIngestCrossFileEdge: finding 1 - when only uses_class.js is
+// in files but service_def.js exists in repoRoot, the cross-file call edge must still resolve
+// because the repo-wide index is built from ALL .js files in repoRoot.
+func TestJavaScriptAnalyzer_IncrementalIngestCrossFileEdge(t *testing.T) {
+	a := analyze.NewJavaScript()
+
+	// Only the changed file in the diff set (incremental ingest scenario).
+	res, err := a.Analyze(context.Background(), "testdata/js", []string{"src/uses_class.js"})
+	require.NoError(t, err)
+
+	// factory() calls ServiceClass() imported from service_def.js (NOT in diff set).
+	edge, ok := findEdge(res.Edges, contract.RelCalls,
+		"js:func:src/uses_class.js::factory", "js:class:src/service_def.js::ServiceClass")
+	require.True(t, ok, "expected factory->ServiceClass imported_name_match edge even when service_def.js is outside the diff set (incremental ingest)")
+	require.Equal(t, contract.ResImportedNameMatch, edge.Properties["resolution"])
+}
+
 // TestJavaScriptAnalyzer_Unresolved: a call to a plain undefined identifier produces no calls edge
 // and leaves a dangling_call property on the caller.
 func TestJavaScriptAnalyzer_Unresolved(t *testing.T) {
