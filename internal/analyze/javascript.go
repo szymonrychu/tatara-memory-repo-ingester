@@ -45,6 +45,7 @@ func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) 
 		relPath string
 		src     []byte
 		root    *sitter.Node
+		defs    map[string]string
 	}
 
 	var res Result
@@ -76,6 +77,7 @@ func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) 
 			relPath: relPath,
 			src:     src,
 			root:    root,
+			defs:    jsFileDefs(relPath, root, src),
 		})
 	}
 
@@ -84,8 +86,7 @@ func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) 
 	moduleSet := make(map[string]bool, len(allParsed))
 	for _, pf := range allParsed {
 		moduleSet[pf.relPath] = true
-		defs := jsFileDefs(pf.relPath, pf.root, pf.src)
-		for name, id := range defs {
+		for name, id := range pf.defs {
 			repoIndex[name] = append(repoIndex[name], id)
 		}
 	}
@@ -95,9 +96,8 @@ func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) 
 		if !diffSet[pf.relPath] {
 			continue
 		}
-		moduleDefs := jsFileDefs(pf.relPath, pf.root, pf.src)
 		importMap := jsImportMap(pf.relPath, pf.root, pf.src, repoIndex, moduleSet)
-		j.processFile(pf.relPath, pf.src, pf.root, moduleDefs, importMap, repoIndex, moduleSet, &res)
+		j.processFile(pf.relPath, pf.src, pf.root, pf.defs, importMap, repoIndex, moduleSet, &res)
 	}
 
 	return res, nil
@@ -459,12 +459,16 @@ func (j jsAnalyzer) processFile(
 			rawSource := jsStringValue(srcNode, src)
 			resolved := resolveModulePath(fileDir, rawSource)
 			if strings.HasPrefix(rawSource, ".") {
-				res.Edges = append(res.Edges, contract.Edge{
-					From:     modID,
-					To:       moduleID(resolved),
-					Relation: contract.RelImports,
-					SrcFile:  relPath,
-				})
+				targetID := moduleID(resolved)
+				if !emittedImports[targetID] {
+					emittedImports[targetID] = true
+					res.Edges = append(res.Edges, contract.Edge{
+						From:     modID,
+						To:       targetID,
+						Relation: contract.RelImports,
+						SrcFile:  relPath,
+					})
+				}
 			} else if !seenExternal[rawSource] {
 				// Bare specifier not in-repo -> requires SymbolRow.
 				seenExternal[rawSource] = true

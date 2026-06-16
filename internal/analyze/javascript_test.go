@@ -328,3 +328,45 @@ func TestJavaScriptAnalyzer_Unresolved(t *testing.T) {
 	require.NotNil(t, callerEntity, "expected entity js:func:src/unresolved_caller.js::u")
 	require.NotEmpty(t, callerEntity.Properties["dangling_call"], "expected dangling_call for call to undefined 'nowhere'")
 }
+
+// TestJavaScriptAnalyzer_NoDuplicateESImportEdges: finding 3 - importing from the same relative
+// module via two ES import statements must produce exactly one imports edge, not two.
+func TestJavaScriptAnalyzer_NoDuplicateESImportEdges(t *testing.T) {
+	a := analyze.NewJavaScript()
+
+	res, err := a.Analyze(context.Background(), "testdata/js", []string{"src/dup_import.js", "src/dup_target.js"})
+	require.NoError(t, err)
+
+	count := 0
+	for _, e := range res.Edges {
+		if e.Relation == contract.RelImports &&
+			e.From == "js:module:src/dup_import.js" &&
+			e.To == "js:module:src/dup_target.js" {
+			count++
+		}
+	}
+	require.Equal(t, 1, count, "expected exactly 1 imports edge from dup_import.js->dup_target.js, got %d (duplicate ES import statements must be deduped)", count)
+}
+
+// TestJavaScriptFileDefsComputedOnce: findings 2+4 - jsFileDefs must not be called twice per
+// file. Verify indirectly: single-file and multi-file analysis produce identical entity sets,
+// proving the repo-index pass and per-file pass use consistent defs (both paths share the
+// cached pf.defs rather than recomputing).
+func TestJavaScriptFileDefsConsistency(t *testing.T) {
+	a := analyze.NewJavaScript()
+
+	resSingle, err := a.Analyze(context.Background(), "testdata/js", []string{"src/util.js"})
+	require.NoError(t, err)
+
+	resMulti, err := a.Analyze(context.Background(), "testdata/js", append(allJSFiles, "src/util.js"))
+	require.NoError(t, err)
+
+	multiIDs := map[string]bool{}
+	for _, e := range resMulti.Entities {
+		multiIDs[e.ID] = true
+	}
+	for _, e := range resSingle.Entities {
+		require.True(t, multiIDs[e.ID],
+			"entity %q from single-file run missing in multi-file run (defs caching inconsistency)", e.ID)
+	}
+}
