@@ -18,11 +18,12 @@ import (
 // Metrics holds all registered counters and histograms.
 type Metrics struct {
 	// Ingest-level counters.
-	IngestRunsTotal     prometheus.Counter
-	PushRequestsTotal   *prometheus.CounterVec   // labels: path, result (ok|err)
-	IngestStageDuration *prometheus.HistogramVec // labels: stage
-	SemanticMissesTotal prometheus.Counter
-	LLMCallsTotal       *prometheus.CounterVec // labels: result (ok|fail)
+	IngestRunsTotal      prometheus.Counter
+	IngestRunResultTotal *prometheus.CounterVec   // labels: result (success|failure)
+	PushRequestsTotal    *prometheus.CounterVec   // labels: path, result (ok|err)
+	IngestStageDuration  *prometheus.HistogramVec // labels: stage
+	SemanticMissesTotal  prometheus.Counter
+	LLMCallsTotal        *prometheus.CounterVec // labels: result (ok|fail)
 
 	// Analyzer-level counters (labels: language).
 	AnalyzerEntitiesTotal    *prometheus.CounterVec   // labels: language
@@ -49,6 +50,10 @@ func New() *Metrics {
 		Name: "ingest_runs_total",
 		Help: "Total number of ingest runs started.",
 	})
+	m.IngestRunResultTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ingest_run_result_total",
+		Help: "Terminal result of each ingest run (success|failure).",
+	}, []string{"result"})
 	m.PushRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "push_requests_total",
 		Help: "Total push HTTP requests by path and result (ok|err).",
@@ -100,6 +105,7 @@ func New() *Metrics {
 
 	reg.MustRegister(
 		m.IngestRunsTotal,
+		m.IngestRunResultTotal,
 		m.PushRequestsTotal,
 		m.IngestStageDuration,
 		m.SemanticMissesTotal,

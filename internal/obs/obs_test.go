@@ -60,6 +60,36 @@ func TestPushSendsTextMetrics(t *testing.T) {
 	assert.Contains(t, received, `result="fail"`, "fail label must be present")
 }
 
+// TestNewRegistersIngestRunResultTotal verifies the result-labeled run counter
+// is present. This is a regression test for the missing result dimension on
+// IngestRunsTotal (finding 1: no success/failure outcome metric).
+func TestNewRegistersIngestRunResultTotal(t *testing.T) {
+	m := obs.New()
+	require.NotNil(t, m.IngestRunResultTotal, "IngestRunResultTotal must be registered")
+	// Incrementing both labels must not panic.
+	m.IngestRunResultTotal.WithLabelValues("success").Inc()
+	m.IngestRunResultTotal.WithLabelValues("failure").Inc()
+}
+
+// TestPushCarriesRunResultTotal verifies that result-labeled counts appear in
+// the pushed text, so the operator can alert on ingest failures.
+func TestPushCarriesRunResultTotal(t *testing.T) {
+	m := obs.New()
+	m.IngestRunResultTotal.WithLabelValues("failure").Inc()
+
+	var received string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		received = string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	require.NoError(t, m.Push(context.Background(), srv.URL, http.DefaultClient))
+	assert.Contains(t, received, "ingest_run_result_total", "pushed text must include result counter")
+	assert.Contains(t, received, `result="failure"`, "failure label must be present")
+}
+
 // TestPushReturnsErrorOnNon2xx verifies Push surfaces server errors.
 func TestPushReturnsErrorOnNon2xx(t *testing.T) {
 	m := obs.New()

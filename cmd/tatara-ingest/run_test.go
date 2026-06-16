@@ -729,6 +729,38 @@ func TestRunPushesMetricsWhenURLSet(t *testing.T) {
 	require.Contains(t, got, "ingest_runs_total", "metrics push must carry the gathered Prometheus text")
 }
 
+// TestRunRecordsFailureResultMetric verifies finding 1: a failed run (bad
+// repoRoot so walk.Diff fails) must push ingest_run_result_total{result="failure"}
+// and must also push ingest_stage_duration_seconds{stage="total"}.
+func TestRunRecordsFailureResultMetric(t *testing.T) {
+	var metricsBody string
+	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		metricsBody = string(b)
+		w.WriteHeader(200)
+	}))
+	defer metrics.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	opts := options{
+		repoRoot:       "/nonexistent-repo-for-test",
+		repoName:       "m",
+		baseURL:        srv.URL,
+		metricsPushURL: metrics.URL,
+	}
+	err := run(context.Background(), opts, http.DefaultClient)
+	require.Error(t, err, "walk.Diff on nonexistent repo must fail")
+
+	require.Contains(t, metricsBody, `result="failure"`,
+		"failed run must push ingest_run_result_total{result=\"failure\"}")
+	require.Contains(t, metricsBody, `stage="total"`,
+		"failed run must push total duration via IngestStageDuration")
+}
+
 // newGitRepo creates an initialized git repo in a temp dir.
 func newGitRepo(t *testing.T) string {
 	t.Helper()

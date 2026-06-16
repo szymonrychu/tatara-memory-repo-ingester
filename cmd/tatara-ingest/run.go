@@ -42,25 +42,32 @@ type options struct {
 	getenv          func(string) string
 }
 
-func run(ctx context.Context, o options, hc *http.Client) error {
+func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 	m := obs.New()
 	m.IngestRunsTotal.Inc()
+	start := time.Now()
 
 	// Short-lived Jobs cannot be scraped; push gathered metrics at job end.
 	// Best-effort: a push failure is logged and never fails the ingest. Deferred
 	// so it fires on every return path (SCIP, normal, and error exits).
-	if o.metricsPushURL != "" {
-		defer func() {
+	// Also records the terminal result counter and total duration on every path.
+	defer func() {
+		m.IngestStageDuration.WithLabelValues("total").Observe(time.Since(start).Seconds())
+		result := "success"
+		if retErr != nil {
+			result = "failure"
+		}
+		m.IngestRunResultTotal.WithLabelValues(result).Inc()
+		if o.metricsPushURL != "" {
 			if err := m.Push(ctx, o.metricsPushURL, hc); err != nil {
-				slog.Warn("metrics push failed", "url", o.metricsPushURL, "error", err)
+				slog.Error("metrics push failed", "url", o.metricsPushURL, "error", err) //nolint:gosec // G706: url and err are internal values, not HTTP input
 			}
-		}()
-	}
+		}
+	}()
 
 	if o.scipPath != "" {
 		return runSCIP(ctx, o, hc, m)
 	}
-	start := time.Now()
 	changes, err := walk.Diff(o.repoRoot, o.since, o.full)
 	if err != nil {
 		return err
@@ -155,7 +162,6 @@ func run(ctx context.Context, o options, hc *http.Client) error {
 	// Best-effort semantic stage: errors are logged and never fail the ingest.
 	runSemantic(ctx, o, cl, commit, changes, m)
 
-	m.IngestStageDuration.WithLabelValues("total").Observe(time.Since(start).Seconds())
 	slog.Info("ingest complete",
 		"repo", o.repoName, "files", len(touched),
 		"analyzed", len(analyzeFiles),
