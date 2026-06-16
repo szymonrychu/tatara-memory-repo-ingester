@@ -115,7 +115,13 @@ func walkLang(root, suffix string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() && strings.HasSuffix(d.Name(), suffix) {
+		if d.IsDir() {
+			if path != root && shouldSkipWalkDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), suffix) {
 			rel, relErr := filepath.Rel(root, path)
 			if relErr != nil {
 				return relErr

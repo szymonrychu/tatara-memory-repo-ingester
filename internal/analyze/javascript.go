@@ -107,8 +107,14 @@ func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) 
 func jsWalkRepo(root string) []string {
 	var out []string
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
 			return err
+		}
+		if d.IsDir() {
+			if path != root && shouldSkipWalkDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		name := d.Name()
 		if strings.HasSuffix(name, ".js") || strings.HasSuffix(name, ".mjs") || strings.HasSuffix(name, ".cjs") {
