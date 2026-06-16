@@ -21,19 +21,20 @@ import (
 type helmAnalyzer struct {
 	log            *slog.Logger
 	repoRoot       string          // optional; when set, Match validates Chart.yaml presence on disk
+	mu             sync.Mutex      // guards chartRootCache (finding 10)
 	chartRootCache map[string]bool // memoizes chartRoot->Chart.yaml-exists results (finding 2 r2)
 }
 
 // NewHelm returns the Helm chart analyzer. repoRoot is optional (empty = no disk validation in Match).
 func NewHelm(repoRoot string) Analyzer {
-	return helmAnalyzer{log: slog.Default(), repoRoot: repoRoot, chartRootCache: map[string]bool{}}
+	return &helmAnalyzer{log: slog.Default(), repoRoot: repoRoot, chartRootCache: map[string]bool{}}
 }
 
-func (helmAnalyzer) Name() string { return "helm" }
+func (*helmAnalyzer) Name() string { return "helm" }
 
 // Match returns true for Chart.yaml, or values.yaml/templates/ files that belong to a real
 // Helm chart (has a Chart.yaml sibling on disk when repoRoot is set).
-func (ha helmAnalyzer) Match(filePath string) bool {
+func (ha *helmAnalyzer) Match(filePath string) bool {
 	base := filepath.Base(filePath)
 
 	// Chart.yaml is the chart marker itself; always claim it.
@@ -61,15 +62,20 @@ func (ha helmAnalyzer) Match(filePath string) bool {
 }
 
 // chartRootHasChartYAML checks whether chartRoot contains Chart.yaml, memoizing the result.
-func (ha helmAnalyzer) chartRootHasChartYAML(chartRoot string) bool {
-	if cached, ok := ha.chartRootCache[chartRoot]; ok {
+func (ha *helmAnalyzer) chartRootHasChartYAML(chartRoot string) bool {
+	ha.mu.Lock()
+	cached, ok := ha.chartRootCache[chartRoot]
+	ha.mu.Unlock()
+	if ok {
 		return cached
 	}
 	chartYAMLPath := path.Join(chartRoot, "Chart.yaml")
 	absChartYAML := filepath.Join(ha.repoRoot, filepath.FromSlash(chartYAMLPath))
 	_, err := os.Stat(absChartYAML)
 	exists := err == nil
+	ha.mu.Lock()
 	ha.chartRootCache[chartRoot] = exists
+	ha.mu.Unlock()
 	return exists
 }
 
@@ -77,11 +83,12 @@ func (ha helmAnalyzer) chartRootHasChartYAML(chartRoot string) bool {
 type chartManifest struct {
 	Name         string `json:"name"`
 	Dependencies []struct {
-		Name string `json:"name"`
+		Name  string `json:"name"`
+		Alias string `json:"alias"`
 	} `json:"dependencies"`
 }
 
-func (ha helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) (Result, error) {
+func (ha *helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) (Result, error) {
 	// Group files by chart root (dir containing Chart.yaml).
 	chartFiles := map[string][]string{}
 
@@ -115,6 +122,15 @@ func (ha helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []strin
 		if err := sigsyaml.Unmarshal(rawChart, &manifest); err != nil {
 			ha.log.Warn("helm: cannot parse Chart.yaml", "path", chartYAMLPath, "err", err)
 			res.ParseErrors++
+			// Only a Chart.yaml that is itself in the diff must be excluded from
+			// reconcile; a repo-context Chart.yaml read for chart-name resolution
+			// is not a diff file and must not poison the reconcile set.
+			for _, f := range cfiles {
+				if filepath.ToSlash(f) == chartYAMLPath {
+					res.FailedFiles = append(res.FailedFiles, chartYAMLPath)
+					break
+				}
+			}
 			continue
 		}
 		chartName := manifest.Name
@@ -150,15 +166,19 @@ func (ha helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []strin
 		// unchanged Chart.yaml means the dependency relationships are unchanged.
 		if chartEntityPath != "" {
 			for _, dep := range manifest.Dependencies {
+				targetName := dep.Name
+				if dep.Alias != "" {
+					targetName = dep.Alias
+				}
+				score, tier, props := edgeConfidence(contract.ResTypeResolved)
 				res.Edges = append(res.Edges, contract.Edge{
-					From:     chartID,
-					To:       "helm:chart:" + dep.Name,
-					Relation: contract.RelSubchart,
-					SrcFile:  chartEntityPath,
-					Properties: map[string]string{
-						"resolution": contract.ResTypeResolved,
-						"confidence": contract.ConfidenceFor(contract.ResTypeResolved),
-					},
+					From:            chartID,
+					To:              "helm:chart:" + targetName,
+					Relation:        contract.RelSubchart,
+					SrcFile:         chartEntityPath,
+					ConfidenceScore: score,
+					ConfidenceTier:  tier,
+					Properties:      props,
 				})
 			}
 		}
@@ -178,6 +198,7 @@ func (ha helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []strin
 				if err := sigsyaml.Unmarshal(rawValues, &flat); err != nil {
 					ha.log.Warn("helm: cannot parse values.yaml", "path", valuesPath, "err", err)
 					res.ParseErrors++
+					res.FailedFiles = append(res.FailedFiles, valuesPath)
 					break
 				}
 				// Sort keys for deterministic output (finding 10).
@@ -208,7 +229,7 @@ func (ha helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []strin
 	return res, nil
 }
 
-func (ha helmAnalyzer) processTemplate(repoRoot, relPath, chartName string, res *Result) {
+func (ha *helmAnalyzer) processTemplate(repoRoot, relPath, chartName string, res *Result) {
 	tmplID := "helm:template:" + relPath
 
 	res.Entities = append(res.Entities, contract.Entity{
@@ -233,6 +254,7 @@ func (ha helmAnalyzer) processTemplate(repoRoot, relPath, chartName string, res 
 	if err != nil {
 		ha.log.Warn("helm: cannot parse template", "path", relPath, "err", err)
 		res.ParseErrors++
+		res.FailedFiles = append(res.FailedFiles, relPath)
 		return
 	}
 
@@ -297,16 +319,18 @@ func walkNodes(nodes []parse.Node, tmplID, srcFile, chartName string, seen map[s
 			}
 		case *parse.TemplateNode:
 			// {{template "name" .}} -> includes edge
-			appendEdgeOnce(seen, res, contract.Edge{
-				From:     tmplID,
-				To:       "helm:include:" + node.Name,
-				Relation: contract.RelIncludes,
-				SrcFile:  srcFile,
-				Properties: map[string]string{
-					"resolution": contract.ResTypeResolved,
-					"confidence": contract.ConfidenceFor(contract.ResTypeResolved),
-				},
-			})
+			{
+				score, tier, props := edgeConfidence(contract.ResTypeResolved)
+				appendEdgeOnce(seen, res, contract.Edge{
+					From:            tmplID,
+					To:              "helm:include:" + node.Name,
+					Relation:        contract.RelIncludes,
+					SrcFile:         srcFile,
+					ConfidenceScore: score,
+					ConfidenceTier:  tier,
+					Properties:      props,
+				})
+			}
 		}
 	}
 }
@@ -321,15 +345,15 @@ func processCmd(cmd *parse.CommandNode, tmplID, srcFile, chartName string, seen 
 	if id, ok := cmd.Args[0].(*parse.IdentifierNode); ok {
 		if (id.Ident == "include" || id.Ident == "template") && len(cmd.Args) >= 2 {
 			if strNode, ok := cmd.Args[1].(*parse.StringNode); ok {
+				score, tier, props := edgeConfidence(contract.ResTypeResolved)
 				appendEdgeOnce(seen, res, contract.Edge{
-					From:     tmplID,
-					To:       "helm:include:" + strNode.Text,
-					Relation: contract.RelIncludes,
-					SrcFile:  srcFile,
-					Properties: map[string]string{
-						"resolution": contract.ResTypeResolved,
-						"confidence": contract.ConfidenceFor(contract.ResTypeResolved),
-					},
+					From:            tmplID,
+					To:              "helm:include:" + strNode.Text,
+					Relation:        contract.RelIncludes,
+					SrcFile:         srcFile,
+					ConfidenceScore: score,
+					ConfidenceTier:  tier,
+					Properties:      props,
 				})
 			}
 		}
@@ -353,15 +377,15 @@ func extractValueRefs(n parse.Node, tmplID, srcFile, chartName string, seen map[
 		if len(node.Ident) >= 2 && node.Ident[0] == "Values" {
 			dotted := strings.Join(node.Ident[1:], ".")
 			valueKey := fmt.Sprintf("helm:value:%s.%s", chartName, dotted)
+			score, tier, props := edgeConfidence(contract.ResTypeResolved)
 			appendEdgeOnce(seen, res, contract.Edge{
-				From:     tmplID,
-				To:       valueKey,
-				Relation: contract.RelValueRef,
-				SrcFile:  srcFile,
-				Properties: map[string]string{
-					"resolution": contract.ResTypeResolved,
-					"confidence": contract.ConfidenceFor(contract.ResTypeResolved),
-				},
+				From:            tmplID,
+				To:              valueKey,
+				Relation:        contract.RelValueRef,
+				SrcFile:         srcFile,
+				ConfidenceScore: score,
+				ConfidenceTier:  tier,
+				Properties:      props,
 			})
 		}
 	case *parse.PipeNode:
@@ -381,7 +405,10 @@ func appendEdgeOnce(seen map[string]bool, res *Result, e contract.Edge) {
 	res.Edges = append(res.Edges, e)
 }
 
-// flattenValues flattens a nested map into dotted keys, skipping non-scalar leaves.
+// flattenValues flattens a nested map into dotted keys.
+// Empty maps emit the key itself (so values.yaml keys and emitted entities stay 1:1).
+// List-valued keys are emitted as a single scalar key (their structure is opaque to
+// the static analyzer).
 func flattenValues(m map[string]any, prefix string) []string {
 	var keys []string
 	for k, v := range m {
@@ -389,10 +416,11 @@ func flattenValues(m map[string]any, prefix string) []string {
 		if prefix != "" {
 			full = prefix + "." + k
 		}
-		switch child := v.(type) {
-		case map[string]any:
+		child, isMap := v.(map[string]any)
+		if isMap && len(child) > 0 {
 			keys = append(keys, flattenValues(child, full)...)
-		default:
+		} else {
+			// Scalar, list, or empty map: emit the key itself.
 			keys = append(keys, full)
 		}
 	}
@@ -430,36 +458,99 @@ func isTemplate(path string) bool {
 	return false
 }
 
-// helmFuncMap is a permissive FuncMap where every helm builtin is a no-op.
+// helmFuncMap is a permissive FuncMap where every helm/sprig builtin is a no-op.
 // Built once at package init (finding 9) and reused across all processTemplate calls.
+// The list covers the full sprig v3 surface plus helm-specific functions so that
+// text/template never returns "function X not defined" on any chart produced by
+// `helm create` or using standard sprig helpers (finding 1).
 var helmFuncMap = sync.OnceValue(func() template.FuncMap {
 	noop := func(args ...any) string { return "" }
 	noopBool := func(args ...any) bool { return false }
 	names := []string{
-		"include", "toYaml", "fromYaml", "toJson", "fromJson",
-		"required", "default", "empty", "coalesce", "compact",
-		"toRawJson", "toPrettyJson", "b64enc", "b64dec",
+		// Helm builtins
+		"include", "tpl", "template", "required", "lookup", "fail",
+		// YAML/JSON
+		"toYaml", "fromYaml", "fromYamlArray",
+		"toJson", "fromJson", "fromJsonArray",
+		"toRawJson", "toPrettyJson",
+		"mustToYaml", "mustFromYaml", "mustToJson", "mustFromJson",
+		"mustToRawJson",
+		// Encoding
+		"b64enc", "b64dec", "b32enc", "b32dec",
+		"urlquery", "urlunquery",
+		"htmlEscape", "htmlUnescape",
+		// Strings - basic
 		"quote", "squote", "upper", "lower", "title", "untitle",
 		"trim", "trimAll", "trimPrefix", "trimSuffix",
+		"trunc", "abbrev", "abbrevboth",
 		"contains", "hasPrefix", "hasSuffix", "replace",
+		"repeat", "substr", "nospace",
 		"cat", "indent", "nindent", "wrap", "wrapWith",
-		"list", "dict", "set", "unset", "hasKey", "keys", "values",
-		"merge", "mergeOverwrite", "pick", "omit",
-		"toStrings", "toString", "int", "int64", "float64",
-		"add", "sub", "div", "mul", "mod", "max", "min",
-		"ceil", "floor", "round",
-		"now", "date", "dateModify", "dateInZone", "toDate",
-		"uuidv4", "sha256sum", "sha1sum", "adler32sum",
-		"htpasswd", "encryptAES", "decryptAES",
+		"plural", "toString",
+		// Strings - case
+		"camelcase", "snakecase", "kebabcase",
+		"swapcase", "initials",
+		// Strings - split/join
+		"split", "splitList", "splitn",
+		"join", "sortAlpha",
+		"toStrings",
+		// Strings - regex
+		"regexMatch", "mustRegexMatch",
+		"regexFindAll", "mustRegexFindAll",
+		"regexFind", "mustRegexFind",
+		"regexReplaceAll", "mustRegexReplaceAll",
+		"regexReplaceAllLiteral", "mustRegexReplaceAllLiteral",
+		"regexSplit", "mustRegexSplit",
+		// Math
+		"add", "add1", "sub", "div", "mul", "mod", "max", "min",
+		"ceil", "floor", "round", "biggest",
+		"addf", "add1f", "subf", "divf", "mulf", "maxf", "minf",
+		"toDecimal", "seq", "int", "int64", "float64", "atoi",
+		// Collections - lists
+		"list", "first", "rest", "last", "initial", "reverse", "uniq", "without",
+		"has", "compact", "slice", "append", "prepend", "concat",
+		"mustFirst", "mustRest", "mustLast", "mustInitial", "mustReverse",
+		"mustHas", "mustCompact", "mustSlice", "mustAppend", "mustPrepend",
+		"mustUniq", "mustWithout",
+		"chunk",
+		// Collections - dicts
+		"dict", "set", "unset", "hasKey", "keys", "values", "dig",
+		"get", "pluck", "pick", "omit", "merge", "mergeOverwrite",
+		"mustMerge", "mustMergeOverwrite",
+		"deepCopy", "mustDeepCopy",
+		// Type checks
+		"default", "empty", "coalesce",
+		"ternary",
 		"kindOf", "kindIs", "typeOf", "typeIs", "typeIsLike",
-		"deepEqual", "deepCopy",
+		"deepEqual",
+		"isAbs", "isInt", "isFloat",
+		// Crypto / UUID
+		"uuidv4",
+		"sha256sum", "sha1sum", "adler32sum",
+		"htpasswd",
+		"encryptAES", "decryptAES",
+		"genCA", "genSelfSignedCert", "genSignedCert",
+		"derivePassword",
+		"randAlphaNum", "randAlpha", "randNumeric", "randAscii",
+		"bcrypt", "htpasswd",
+		// Date/time
+		"now", "date", "dateModify", "dateInZone", "toDate", "unixEpoch",
+		"dateAdd", "ago", "duration", "durationRound",
+		"mustToDate",
+		// Network
+		"getHostByName",
+		// Semver
 		"semver", "semverCompare",
-		"lookup", "fail",
-		"tpl", "template",
+		// Reflection / printing
+		"print", "println", "printf",
+		"until", "untilStep",
+		"indent", "nindent",
+		"urlParse", "urlJoin",
+		"fileExtension", "fileBase", "fileDir", "filePath", "osBase", "osDir", "osExt",
 	}
 	fm := template.FuncMap{}
-	for _, name := range names {
-		fm[name] = noop
+	for _, n := range names {
+		fm[n] = noop
 	}
 	fm["and"] = noopBool
 	fm["or"] = noopBool

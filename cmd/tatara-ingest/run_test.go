@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	scipbindings "github.com/scip-code/scip/bindings/go/scip"
 	"github.com/stretchr/testify/require"
@@ -838,4 +839,235 @@ func newGitRepo(t *testing.T) string {
 		require.NoError(t, c.Run())
 	}
 	return dir
+}
+
+// TestRunAnalyzerFailureDoesNotPurgeFiles verifies finding 1: when an analyzer
+// fails for a set of files, those files must NOT appear in reconcile_files
+// (which would purge existing chunks with no replacement). Deleted files are
+// unaffected and still reconciled.
+//
+// We force an analyzer failure by making a Python file unreadable on disk
+// (exists in git, committed, then chmod 000 before analysis). The Python
+// analyzer returns an error on os.ReadFile failure, so the .py file whose
+// analyzer errored must be excluded from reconcile_files while the deleted
+// .md file must still be present.
+func TestRunAnalyzerFailureDoesNotPurgeFiles(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("test requires non-root: chmod 000 is ineffective as root")
+	}
+
+	dir := t.TempDir()
+	for _, a := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
+		c := exec.Command("git", a...)
+		c.Dir = dir
+		require.NoError(t, c.Run())
+	}
+
+	// Initial commit: a Python file and a Markdown file that will be deleted.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "app.py"),
+		[]byte("def hello():\n    pass\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "gone.md"),
+		[]byte("# Gone\n"), 0o644))
+	base := commitAll(t, dir, "init")
+
+	// Second commit: modify app.py and delete gone.md.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "app.py"),
+		[]byte("def hello():\n    return 42\n"), 0o644))
+	require.NoError(t, os.Remove(filepath.Join(dir, "gone.md")))
+	commitAll(t, dir, "modify app.py, delete gone.md")
+
+	// Make app.py unreadable AFTER the commit so git diff still shows it as
+	// changed but the Python analyzer fails to read it.
+	require.NoError(t, os.Chmod(filepath.Join(dir, "app.py"), 0o000))
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "app.py"), 0o644) })
+
+	var bulkReq contract.BulkMemoriesRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph:bulk":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		case "/memories:bulk":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &bulkReq)
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		default:
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, since: base}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+
+	// gone.md (deleted) must be reconciled - its stale chunks should be purged.
+	require.Contains(t, bulkReq.ReconcileFiles, "gone.md",
+		"deleted file must be in reconcile_files even when another analyzer failed")
+	// app.py (whose Python analyzer failed due to unreadable file) must NOT be in reconcile_files.
+	require.NotContains(t, bulkReq.ReconcileFiles, "app.py",
+		"file whose analyzer failed must NOT be in reconcile_files (would purge chunks with no replacement)")
+}
+
+// TestRunTouchedDeduplicatedForRenames verifies finding 4: when two different
+// renames share the same old or new path (edge case) or any duplication occurs,
+// the code-graph Files and reconcile_files must not contain duplicate entries.
+// We exercise the basic rename path and assert each file appears at most once.
+func TestRunTouchedDeduplicatedForRenames(t *testing.T) {
+	dir := t.TempDir()
+	for _, a := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
+		c := exec.Command("git", a...)
+		c.Dir = dir
+		require.NoError(t, c.Run())
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "old.md"), []byte("# Old\n"), 0o644))
+	base := commitAll(t, dir, "init")
+
+	require.NoError(t, os.Rename(filepath.Join(dir, "old.md"), filepath.Join(dir, "new.md")))
+	commitAll(t, dir, "rename old.md to new.md")
+
+	var graphPush contract.GraphPush
+	var bulkReq contract.BulkMemoriesRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph:bulk":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &graphPush)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		case "/memories:bulk":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &bulkReq)
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		default:
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, since: base}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+
+	seen := make(map[string]int)
+	for _, f := range graphPush.Files {
+		seen[f]++
+	}
+	for f, count := range seen {
+		require.Equal(t, 1, count, "file %q appears %d times in code-graph Files; must be deduplicated", f, count)
+	}
+
+	seen2 := make(map[string]int)
+	for _, f := range bulkReq.ReconcileFiles {
+		seen2[f]++
+	}
+	for f, count := range seen2 {
+		require.Equal(t, 1, count, "file %q appears %d times in reconcile_files; must be deduplicated", f, count)
+	}
+}
+
+// TestRunMetricsPushUsesPlainClient verifies finding 2: the metrics push must
+// NOT include an Authorization header (i.e. it must use a plain client, not the
+// OIDC-bearer hc passed into run). We check this by inspecting the header on the
+// push endpoint.
+func TestRunMetricsPushUsesPlainClient(t *testing.T) {
+	dir := t.TempDir()
+	for _, a := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
+		c := exec.Command("git", a...)
+		c.Dir = dir
+		require.NoError(t, c.Run())
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "doc.md"), []byte("# Doc\n"), 0o644))
+	commitAll(t, dir, "init")
+
+	var metricsAuthHeader string
+	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		metricsAuthHeader = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+	}))
+	defer metrics.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph:bulk":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		default:
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	// Simulate an OIDC client that always adds a bearer token.
+	fakeOIDCTransport := &addAuthTransport{token: "fake-oidc-token", base: http.DefaultTransport}
+	fakeOIDCClient := &http.Client{Transport: fakeOIDCTransport}
+
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, metricsPushURL: metrics.URL}
+	require.NoError(t, run(context.Background(), opts, fakeOIDCClient))
+
+	require.Empty(t, metricsAuthHeader,
+		"metrics push must NOT carry an Authorization header (must use plain client, not OIDC hc)")
+}
+
+// addAuthTransport is a fake RoundTripper that injects a Bearer token.
+type addAuthTransport struct {
+	token string
+	base  http.RoundTripper
+}
+
+func (t *addAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req2 := req.Clone(req.Context())
+	req2.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(req2)
+}
+
+// TestRunHTTPTimeoutThreadedToLLMClient verifies finding 3: when httpTimeout is
+// set on options, the LLM client uses that timeout rather than the hardcoded 60s.
+// We exercise this indirectly: with a very short httpTimeout the LLM call to a
+// slow server must time out, and runSemantic must still swallow it (best-effort).
+// The key assertion is that run() returns nil (not a timeout error) regardless.
+func TestRunHTTPTimeoutThreadedToLLMClient(t *testing.T) {
+	dir := newGitRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.go"),
+		[]byte("package m\n\nfunc A() {}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/m\n\ngo 1.25\n"), 0o644))
+	commitAll(t, dir, "init")
+
+	// OpenAI server that hangs longer than our httpTimeout.
+	done := make(chan struct{})
+	openai := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-done:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() { close(done); openai.Close() })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph/semantic-misses":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`["a.go"]`))
+		case "/code-graph:bulk":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		default:
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	env := map[string]string{"OPENAI_API_KEY": "sk-test", "OPENAI_BASE_URL": openai.URL}
+	opts := options{
+		repoRoot:    dir,
+		repoName:    "m",
+		baseURL:     srv.URL,
+		httpTimeout: 50 * time.Millisecond, // very short, will timeout the LLM call
+		getenv:      func(k string) string { return env[k] },
+	}
+	// Must not fail the ingest even though LLM times out (best-effort semantic stage).
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
 }

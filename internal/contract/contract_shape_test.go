@@ -307,6 +307,50 @@ func TestGraphPushExtractorAndFileSHAsOmitEmpty(t *testing.T) {
 	require.False(t, hasSHAs, "file_shas must be absent when empty")
 }
 
+// TestIngestJobJSONShape asserts that IngestJob serialises all fields the server
+// emits: id, status, total, done, failed, errors, created_at, updated_at.
+// The package doc says types mirror the server 'byte-for-byte'; without
+// created_at/updated_at the claim is false and any future key-set equality
+// assertion in this suite will diverge silently.
+func TestIngestJobJSONShape(t *testing.T) {
+	j := contract.IngestJob{
+		ID:        "job-1",
+		Status:    contract.JobSucceeded,
+		Total:     2,
+		Done:      2,
+		Failed:    0,
+		CreatedAt: "2026-06-16T00:00:00Z",
+		UpdatedAt: "2026-06-16T00:01:00Z",
+		Errors: []struct {
+			IdempotencyKey string `json:"idempotency_key"`
+			Error          string `json:"error"`
+		}{{IdempotencyKey: "k", Error: "e"}},
+	}
+	b, err := json.Marshal(j)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	require.ElementsMatch(t,
+		[]string{"id", "status", "total", "done", "failed", "created_at", "updated_at", "errors"},
+		keys(got))
+	require.Equal(t, "2026-06-16T00:00:00Z", got["created_at"])
+	require.Equal(t, "2026-06-16T00:01:00Z", got["updated_at"])
+}
+
+// TestIngestJobTimestampsOmitEmpty ensures created_at/updated_at are absent
+// when zero, consistent with the server's omitempty behaviour.
+func TestIngestJobTimestampsOmitEmpty(t *testing.T) {
+	j := contract.IngestJob{ID: "job-2", Status: contract.JobFailed, Total: 1, Done: 0, Failed: 1}
+	b, err := json.Marshal(j)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	_, hasCreated := got["created_at"]
+	_, hasUpdated := got["updated_at"]
+	require.False(t, hasCreated, "created_at must be absent when zero")
+	require.False(t, hasUpdated, "updated_at must be absent when zero")
+}
+
 func TestSemanticMissesRequestShape(t *testing.T) {
 	req := contract.SemanticMissesRequest{
 		Repo: "r",

@@ -82,7 +82,8 @@ func (c *Client) PushChunks(ctx context.Context, repo string, reconcileFiles []s
 		polls++
 		select {
 		case <-pollCtx.Done():
-			return fmt.Errorf("ingest job %s did not reach terminal within %s: %w", job.ID, maxJobWait, pollCtx.Err())
+			return fmt.Errorf("ingest job %s did not reach terminal within %s: status=%s done=%d/%d failed=%d: %w",
+				job.ID, maxJobWait, job.Status, job.Done, job.Total, job.Failed, pollCtx.Err())
 		case <-time.After(c.pollInterval):
 		}
 		// Retry transient poll errors: a momentary 502/503 on the status read

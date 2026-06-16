@@ -30,7 +30,7 @@ const sampleFragment = `{
 }`
 
 func TestParseFragmentConceptNodeIDs(t *testing.T) {
-	res, err := ParseFragment("myrepo", []byte(sampleFragment))
+	res, err := ParseFragment("myrepo", []byte(sampleFragment), nil)
 	require.NoError(t, err)
 	// code file_type nodes are NOT emitted as entities (they reference AST nodes).
 	// concept/rationale file_type nodes ARE emitted with deterministic ids.
@@ -48,7 +48,7 @@ func TestParseFragmentConceptNodeIDs(t *testing.T) {
 }
 
 func TestParseFragmentEdgesMapToContract(t *testing.T) {
-	res, err := ParseFragment("myrepo", []byte(sampleFragment))
+	res, err := ParseFragment("myrepo", []byte(sampleFragment), nil)
 	require.NoError(t, err)
 	require.Len(t, res.Edges, 3)
 	var sim contract.Edge
@@ -68,7 +68,7 @@ func TestParseFragmentEdgesMapToContract(t *testing.T) {
 // concept:<repo>:<slug> form. Without this remap the edges are dangling - the entity
 // is emitted as "concept:myrepo:retry-backoff" but the edge target stays "retry_backoff".
 func TestParseFragmentConceptEdgesRemapped(t *testing.T) {
-	res, err := ParseFragment("myrepo", []byte(sampleFragment))
+	res, err := ParseFragment("myrepo", []byte(sampleFragment), nil)
 	require.NoError(t, err)
 
 	edgesByRelation := map[string]contract.Edge{}
@@ -97,7 +97,7 @@ func TestParseFragmentConceptEdgesRemapped(t *testing.T) {
 }
 
 func TestParseFragmentConfidenceTiers(t *testing.T) {
-	res, err := ParseFragment("myrepo", []byte(sampleFragment))
+	res, err := ParseFragment("myrepo", []byte(sampleFragment), nil)
 	require.NoError(t, err)
 	tiers := map[string]string{}
 	for _, e := range res.Edges {
@@ -109,7 +109,7 @@ func TestParseFragmentConfidenceTiers(t *testing.T) {
 }
 
 func TestParseFragmentHyperedges(t *testing.T) {
-	res, err := ParseFragment("myrepo", []byte(sampleFragment))
+	res, err := ParseFragment("myrepo", []byte(sampleFragment), nil)
 	require.NoError(t, err)
 	require.Len(t, res.Hyperedges, 1)
 	h := res.Hyperedges[0]
@@ -126,7 +126,7 @@ func TestParseFragmentHyperedges(t *testing.T) {
 // match a concept/rationale node id are rewritten to their canonical ids, exactly
 // as edge endpoints are via remapID (finding 2).
 func TestParseFragmentHyperedgeMembersRemapped(t *testing.T) {
-	res, err := ParseFragment("myrepo", []byte(sampleFragment))
+	res, err := ParseFragment("myrepo", []byte(sampleFragment), nil)
 	require.NoError(t, err)
 	require.Len(t, res.Hyperedges, 1)
 	members := res.Hyperedges[0].Members
@@ -145,7 +145,7 @@ func TestParseFragmentHyperedgeIDSlugified(t *testing.T) {
 	frag := `{"nodes":[],"edges":[],"hyperedges":[
 	  {"id":"my:edge","label":"x","nodes":["a","b","c"],"relation":"form","confidence_score":0.7,"source_file":"path/to:file.go"}
 	]}`
-	res, err := ParseFragment("r", []byte(frag))
+	res, err := ParseFragment("r", []byte(frag), nil)
 	require.NoError(t, err)
 	require.Len(t, res.Hyperedges, 1)
 	// ':' in source_file and id must be slugified to '-'.
@@ -159,7 +159,7 @@ func TestParseFragmentHyperedgeSkipsFewerThanThreeMembers(t *testing.T) {
 	  {"id":"too-small","label":"x","nodes":["a","b"],"relation":"form","confidence_score":0.7,"source_file":"f.go"},
 	  {"id":"just-right","label":"y","nodes":["a","b","c"],"relation":"form","confidence_score":0.7,"source_file":"f.go"}
 	]}`
-	res, err := ParseFragment("r", []byte(frag))
+	res, err := ParseFragment("r", []byte(frag), nil)
 	require.NoError(t, err)
 	require.Len(t, res.Hyperedges, 1)
 	require.Equal(t, "he:r:f-go:just-right", res.Hyperedges[0].ID)
@@ -171,7 +171,7 @@ func TestParseFragmentHyperedgeFallbackIDOnEmptyFields(t *testing.T) {
 	frag := `{"nodes":[],"edges":[],"hyperedges":[
 	  {"id":"","label":"Auth Flow","nodes":["a","b","c"],"relation":"form","confidence_score":0.7,"source_file":""}
 	]}`
-	res, err := ParseFragment("r", []byte(frag))
+	res, err := ParseFragment("r", []byte(frag), nil)
 	require.NoError(t, err)
 	require.Len(t, res.Hyperedges, 1)
 	// Must be a stable fallback id, not "he:r::" which collides.
@@ -188,7 +188,7 @@ func TestParseFragmentEdgesSkipEmptyOrSelfEndpoints(t *testing.T) {
 	  {"source":"a","target":"a","relation":"calls","confidence_score":0.8,"source_file":"f.go"},
 	  {"source":"a","target":"b","relation":"calls","confidence_score":0.8,"source_file":"f.go"}
 	],"hyperedges":[]}`
-	res, err := ParseFragment("r", []byte(frag))
+	res, err := ParseFragment("r", []byte(frag), nil)
 	require.NoError(t, err)
 	require.Len(t, res.Edges, 1)
 	require.Equal(t, "a", res.Edges[0].From)
@@ -213,7 +213,7 @@ func TestStripFencesRobust(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := ParseFragment("r", []byte(tc.input))
+			res, err := ParseFragment("r", []byte(tc.input), nil)
 			require.NoError(t, err, "input: %q", tc.input)
 			_ = res
 		})
@@ -227,19 +227,19 @@ func TestParseFragmentHyperedgesCappedAtThree(t *testing.T) {
 	  {"id":"h3","label":"c","nodes":["x","y","z"],"relation":"form","confidence_score":0.7,"source_file":"f.go"},
 	  {"id":"h4","label":"d","nodes":["x","y","z"],"relation":"form","confidence_score":0.7,"source_file":"f.go"}
 	]}`
-	res, err := ParseFragment("r", []byte(frag))
+	res, err := ParseFragment("r", []byte(frag), nil)
 	require.NoError(t, err)
 	require.Len(t, res.Hyperedges, 3)
 }
 
 func TestParseFragmentRejectsMalformedJSON(t *testing.T) {
-	_, err := ParseFragment("r", []byte("not json"))
+	_, err := ParseFragment("r", []byte("not json"), nil)
 	require.Error(t, err)
 }
 
 func TestParseFragmentStripsCodeFences(t *testing.T) {
 	wrapped := "```json\n" + sampleFragment + "\n```"
-	res, err := ParseFragment("myrepo", []byte(wrapped))
+	res, err := ParseFragment("myrepo", []byte(wrapped), nil)
 	require.NoError(t, err)
 	require.Len(t, res.Edges, 3)
 }
@@ -257,9 +257,80 @@ func TestSlugLabel(t *testing.T) {
 func TestStripFencesTrailingBrace(t *testing.T) {
 	// Trailing prose has a brace: LastIndex would pick the prose '}' not the JSON '}'.
 	input := `{"nodes":[],"edges":[],"hyperedges":[]} Note: see {config} for details.`
-	res, err := ParseFragment("r", []byte(input))
+	res, err := ParseFragment("r", []byte(input), nil)
 	require.NoError(t, err, "trailing prose with brace must not break parsing")
 	require.Empty(t, res.Entities)
+}
+
+// TestParseFragmentFiltersHallucinatedEdgeSrcFile asserts that edges whose
+// source_file is not in the provided validFiles set are dropped rather than
+// passed through to the push, which would reject the entire push (finding 2).
+func TestParseFragmentFiltersHallucinatedEdgeSrcFile(t *testing.T) {
+	frag := `{"nodes":[],"edges":[
+	  {"source":"a","target":"b","relation":"calls","confidence_score":0.8,"source_file":"real/file.go"},
+	  {"source":"c","target":"d","relation":"calls","confidence_score":0.8,"source_file":"hallucinated/path.go"},
+	  {"source":"e","target":"f","relation":"calls","confidence_score":0.8,"source_file":""}
+	],"hyperedges":[]}`
+	valid := map[string]struct{}{"real/file.go": {}}
+	res, err := ParseFragment("r", []byte(frag), valid)
+	require.NoError(t, err)
+	// hallucinated/path.go not in valid -> dropped; "" not in valid -> dropped
+	require.Len(t, res.Edges, 1)
+	require.Equal(t, "real/file.go", res.Edges[0].SrcFile)
+}
+
+// TestParseFragmentBlanksHallucinatedEntityFilePath asserts that concept/rationale
+// entities whose source_file is not in the provided validFiles set have their
+// FilePath blanked (treated as repo-scoped) rather than causing the entire push to
+// be rejected by the memory server (finding 2).
+func TestParseFragmentBlanksHallucinatedEntityFilePath(t *testing.T) {
+	frag := `{"nodes":[
+	  {"id":"n1","label":"Real Concept","file_type":"concept","source_file":"real/file.go"},
+	  {"id":"n2","label":"Bad Concept","file_type":"concept","source_file":"./hallucinated.go"}
+	],"edges":[],"hyperedges":[]}`
+	valid := map[string]struct{}{"real/file.go": {}}
+	res, err := ParseFragment("r", []byte(frag), valid)
+	require.NoError(t, err)
+	require.Len(t, res.Entities, 2)
+	byID := map[string]string{}
+	for _, e := range res.Entities {
+		byID[e.ID] = e.FilePath
+	}
+	require.Equal(t, "real/file.go", byID["concept:r:real-concept"], "valid path must be preserved")
+	require.Equal(t, "", byID["concept:r:bad-concept"], "invalid path must be blanked")
+}
+
+// TestParseFragmentValidFilesNilAcceptsAll asserts that passing a nil validFiles
+// map (backward-compat) preserves all edges and paths unchanged.
+func TestParseFragmentValidFilesNilAcceptsAll(t *testing.T) {
+	frag := `{"nodes":[
+	  {"id":"n1","label":"Any Concept","file_type":"concept","source_file":"any/path.go"}
+	],"edges":[
+	  {"source":"a","target":"b","relation":"calls","confidence_score":0.8,"source_file":"any/path.go"}
+	],"hyperedges":[]}`
+	res, err := ParseFragment("r", []byte(frag), nil)
+	require.NoError(t, err)
+	require.Len(t, res.Entities, 1)
+	require.Equal(t, "any/path.go", res.Entities[0].FilePath)
+	require.Len(t, res.Edges, 1)
+	require.Equal(t, "any/path.go", res.Edges[0].SrcFile)
+}
+
+// TestParseFragmentFiltersHallucinatedHyperedgeSrcFile asserts that hyperedges
+// whose source_file is not in validFiles are dropped, mirroring the edge guard.
+// The server rejects the entire push if any hyperedge src_file is not in Files,
+// so a hallucinated or empty path must not survive.
+func TestParseFragmentFiltersHallucinatedHyperedgeSrcFile(t *testing.T) {
+	frag := `{"nodes":[],"edges":[],"hyperedges":[
+	  {"id":"h1","label":"Good","relation":"participate_in","nodes":["a","b","c"],"source_file":"real/file.go"},
+	  {"id":"h2","label":"Bad","relation":"participate_in","nodes":["d","e","f"],"source_file":"hallucinated/path.go"},
+	  {"id":"h3","label":"Empty","relation":"participate_in","nodes":["g","h","i"],"source_file":""}
+	]}`
+	valid := map[string]struct{}{"real/file.go": {}}
+	res, err := ParseFragment("r", []byte(frag), valid)
+	require.NoError(t, err)
+	require.Len(t, res.Hyperedges, 1, "only the hyperedge with a valid src_file must survive")
+	require.Equal(t, "real/file.go", res.Hyperedges[0].SrcFile)
 }
 
 // TestConceptIDEmptySlug asserts that nodes with punctuation-only labels get
@@ -270,7 +341,7 @@ func TestConceptIDEmptySlug(t *testing.T) {
 	  {"id":"n1","label":"!!!","file_type":"concept","source_file":"f.go"},
 	  {"id":"n2","label":"???","file_type":"rationale","source_file":"f.go"}
 	],"edges":[],"hyperedges":[]}`
-	res, err := ParseFragment("repo", []byte(frag))
+	res, err := ParseFragment("repo", []byte(frag), nil)
 	require.NoError(t, err)
 	require.Len(t, res.Entities, 2)
 	ids := []string{res.Entities[0].ID, res.Entities[1].ID}

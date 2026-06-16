@@ -48,12 +48,30 @@ const maxHyperedgesPerChunk = 3
 // ids (concept:<repo>:<slug>); code/document/paper/image nodes reference AST
 // entity ids and are not re-emitted. Edges carry the semantic relation, score,
 // and tier. Hyperedges are capped at 3 with deterministic ids.
-func ParseFragment(repo string, body []byte) (analyze.Result, error) {
+//
+// validFiles is the set of paths that were actually sent to the LLM. Any edge
+// whose source_file is absent from validFiles is dropped (the memory server
+// rejects the whole push otherwise). Any concept/rationale entity whose
+// source_file is absent has its FilePath blanked so the server treats it as
+// repo-scoped rather than rejecting the push. Pass nil to skip validation
+// (all paths accepted as-is).
+func ParseFragment(repo string, body []byte, validFiles map[string]struct{}) (analyze.Result, error) {
 	var f rawFragment
 	dec := json.NewDecoder(bytes.NewReader(stripFences(body)))
 	if err := dec.Decode(&f); err != nil {
 		return analyze.Result{}, fmt.Errorf("parse extraction fragment: %w", err)
 	}
+	// inValidFiles returns true when validFiles is nil (skip validation) or the
+	// path is present in the set. An empty path is treated as absent so it does
+	// not accidentally satisfy the nil-bypass.
+	inValidFiles := func(path string) bool {
+		if validFiles == nil {
+			return true
+		}
+		_, ok := validFiles[path]
+		return ok
+	}
+
 	// remap: model-emitted id -> canonical conceptID for concept/rationale nodes.
 	// This prevents dangling edges when the LLM uses its own node ids in edge
 	// endpoints rather than the re-keyed concept:<repo>:<slug> form.
@@ -66,11 +84,15 @@ func ParseFragment(repo string, body []byte) (analyze.Result, error) {
 		}
 		cid := conceptID(repo, n.Label)
 		remap[n.ID] = cid
+		fp := n.SourceFile
+		if fp != "" && !inValidFiles(fp) {
+			fp = "" // blank hallucinated paths; server treats "" as repo-scoped
+		}
 		res.Entities = append(res.Entities, contract.Entity{
 			ID:         cid,
 			Name:       n.Label,
 			Type:       typ,
-			FilePath:   n.SourceFile,
+			FilePath:   fp,
 			SourceURL:  n.SourceURL,
 			Author:     n.Author,
 			CapturedAt: n.CapturedAt,
@@ -89,6 +111,11 @@ func ParseFragment(repo string, body []byte) (analyze.Result, error) {
 		if from == "" || to == "" || from == to {
 			continue
 		}
+		// Drop edges whose source_file is not in the chunk's file set; the memory
+		// server rejects the entire push if any edge.SrcFile is not in Files.
+		if !inValidFiles(e.SourceFile) {
+			continue
+		}
 		res.Edges = append(res.Edges, contract.Edge{
 			From:            from,
 			To:              to,
@@ -105,6 +132,12 @@ func ParseFragment(repo string, body []byte) (analyze.Result, error) {
 		}
 		// Contract requires 3+ members; skip under-populated hyperedges.
 		if len(h.Nodes) < 3 {
+			continue
+		}
+		// Drop hyperedges whose source_file is not in the chunk's file set: like
+		// edges, the memory server rejects the entire push if any src_file is not
+		// in Files (mirrors the edge guard above; finding 2).
+		if !inValidFiles(h.SourceFile) {
 			continue
 		}
 		// Remap members through the concept-id table, mirroring edge endpoint remapping.

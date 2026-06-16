@@ -37,7 +37,7 @@ func (p pythonAnalyzer) Match(path string) bool {
 // The repo-wide resolution index is built from ALL .py files found under repoRoot so that
 // incremental ingest (where `files` is a diff subset) still resolves cross-file call edges.
 // Entities, edges, and chunks are only emitted for files in `files`.
-func (p pythonAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) (Result, error) {
+func (p pythonAnalyzer) Analyze(ctx context.Context, repoRoot string, files []string) (Result, error) {
 	lang := python.GetLanguage()
 
 	type parsedFile struct {
@@ -63,16 +63,25 @@ func (p pythonAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 
 	allParsed := make([]parsedFile, 0, len(allPyFiles))
 	for _, relPath := range allPyFiles {
+		if err := ctx.Err(); err != nil {
+			return Result{}, fmt.Errorf("analyze cancelled: %w", err)
+		}
 		absPath := filepath.Join(repoRoot, relPath)
 		src, err := os.ReadFile(absPath) //nolint:gosec
 		if err != nil {
-			return Result{}, fmt.Errorf("read %q: %w", absPath, err)
+			p.log.Warn("python: read failed; skipping", slog.String("file", relPath), slog.String("err", err.Error()))
+			if diffSet[relPath] {
+				res.ParseErrors++
+				res.FailedFiles = append(res.FailedFiles, relPath)
+			}
+			continue
 		}
-		root, err := sitter.ParseCtx(context.Background(), src, lang)
+		root, err := sitter.ParseCtx(ctx, src, lang)
 		if err != nil {
 			p.log.Warn("tree-sitter parse error", slog.String("file", relPath), slog.String("err", err.Error()))
 			if diffSet[relPath] {
 				res.ParseErrors++
+				res.FailedFiles = append(res.FailedFiles, relPath)
 			}
 			continue
 		}
@@ -377,16 +386,27 @@ func pyExternalImports(root *sitter.Node, src []byte, repoIndex map[string][]str
 		child := root.NamedChild(i)
 		switch child.Type() {
 		case "import_statement":
-			// import requests  or  import os.path
+			// import requests  or  import os.path  or  import requests as req
 			nc := int(child.NamedChildCount())
 			for j := 0; j < nc; j++ {
 				n := child.NamedChild(j)
 				if n == nil {
 					continue
 				}
-				name := n.Content(src)
+				// For aliased_import ("import X as Y") use the real name field, not the whole content.
+				var rawName string
+				if n.Type() == "aliased_import" {
+					nameField := n.ChildByFieldName("name")
+					if nameField != nil {
+						rawName = nameField.Content(src)
+					} else {
+						rawName = n.Content(src)
+					}
+				} else {
+					rawName = n.Content(src)
+				}
 				// top-level module name (before first dot)
-				topLevel := strings.SplitN(name, ".", 2)[0]
+				topLevel := strings.SplitN(rawName, ".", 2)[0]
 				if len(repoIndex[topLevel]) == 0 && !seen[topLevel] {
 					seen[topLevel] = true
 					result = append(result, topLevel)
@@ -420,8 +440,20 @@ func pyExternalImports(root *sitter.Node, src []byte, repoIndex map[string][]str
 					if n == child.ChildByFieldName("module_name") {
 						continue
 					}
-					localName := n.Content(src)
-					if len(repoIndex[localName]) > 0 {
+					// For aliased_import ("from pkg import a as b") use the real name,
+					// not the whole "a as b" content, when looking up in repoIndex.
+					var checkName string
+					if n.Type() == "aliased_import" {
+						nameField := n.ChildByFieldName("name")
+						if nameField != nil {
+							checkName = nameField.Content(src)
+						} else {
+							checkName = n.Content(src)
+						}
+					} else {
+						checkName = n.Content(src)
+					}
+					if len(repoIndex[checkName]) > 0 {
 						allUnresolved = false
 						break
 					}
@@ -539,6 +571,7 @@ func (p pythonAnalyzer) emitFunc(
 	}
 
 	danglingCalls := []string{}
+	seenDangling := map[string]bool{}
 	seenEdge := map[string]bool{}
 
 	walkCalls(body, src, func(calleeNode *sitter.Node) {
@@ -546,7 +579,10 @@ func (p pythonAnalyzer) emitFunc(
 
 		// Attribute call (e.g. obj.method) - treat as dangling.
 		if calleeNode.Type() == "attribute" {
-			danglingCalls = append(danglingCalls, calleeName)
+			if !seenDangling[calleeName] {
+				seenDangling[calleeName] = true
+				danglingCalls = append(danglingCalls, calleeName)
+			}
 			return
 		}
 
@@ -558,20 +594,19 @@ func (p pythonAnalyzer) emitFunc(
 				return
 			}
 			seenEdge[funcID+"->"+calleeID] = true
-			conf := contract.ConfidenceFor(contract.ResScopedNameMatch)
-			props := map[string]string{
-				"resolution": contract.ResScopedNameMatch,
-				"confidence": conf,
-			}
+			score, tier, props := edgeConfidence(contract.ResScopedNameMatch)
 			if isDecorated {
 				props = degraded(props, "decorator")
+				score, tier = confidenceFromProps(props)
 			}
 			res.Edges = append(res.Edges, contract.Edge{
-				From:       funcID,
-				To:         calleeID,
-				Relation:   contract.RelCalls,
-				SrcFile:    relPath,
-				Properties: props,
+				From:            funcID,
+				To:              calleeID,
+				Relation:        contract.RelCalls,
+				SrcFile:         relPath,
+				ConfidenceScore: score,
+				ConfidenceTier:  tier,
+				Properties:      props,
 			})
 			return
 		}
@@ -582,20 +617,19 @@ func (p pythonAnalyzer) emitFunc(
 				return
 			}
 			seenEdge[funcID+"->"+calleeID] = true
-			conf := contract.ConfidenceFor(contract.ResImportedNameMatch)
-			props := map[string]string{
-				"resolution": contract.ResImportedNameMatch,
-				"confidence": conf,
-			}
+			score, tier, props := edgeConfidence(contract.ResImportedNameMatch)
 			if isDecorated {
 				props = degraded(props, "decorator")
+				score, tier = confidenceFromProps(props)
 			}
 			res.Edges = append(res.Edges, contract.Edge{
-				From:       funcID,
-				To:         calleeID,
-				Relation:   contract.RelCalls,
-				SrcFile:    relPath,
-				Properties: props,
+				From:            funcID,
+				To:              calleeID,
+				Relation:        contract.RelCalls,
+				SrcFile:         relPath,
+				ConfidenceScore: score,
+				ConfidenceTier:  tier,
+				Properties:      props,
 			})
 			return
 		}
@@ -605,7 +639,10 @@ func (p pythonAnalyzer) emitFunc(
 		switch len(ids) {
 		case 0:
 			// Tier 4: unresolved - dangling.
-			danglingCalls = append(danglingCalls, calleeName)
+			if !seenDangling[calleeName] {
+				seenDangling[calleeName] = true
+				danglingCalls = append(danglingCalls, calleeName)
+			}
 
 		case 1:
 			// global_name_match: unique repo-wide definition.
@@ -613,20 +650,19 @@ func (p pythonAnalyzer) emitFunc(
 				return
 			}
 			seenEdge[funcID+"->"+ids[0]] = true
-			conf := contract.ConfidenceFor(contract.ResGlobalNameMatch)
-			props := map[string]string{
-				"resolution": contract.ResGlobalNameMatch,
-				"confidence": conf,
-			}
+			score, tier, props := edgeConfidence(contract.ResGlobalNameMatch)
 			if isDecorated {
 				props = degraded(props, "decorator")
+				score, tier = confidenceFromProps(props)
 			}
 			res.Edges = append(res.Edges, contract.Edge{
-				From:       funcID,
-				To:         ids[0],
-				Relation:   contract.RelCalls,
-				SrcFile:    relPath,
-				Properties: props,
+				From:            funcID,
+				To:              ids[0],
+				Relation:        contract.RelCalls,
+				SrcFile:         relPath,
+				ConfidenceScore: score,
+				ConfidenceTier:  tier,
+				Properties:      props,
 			})
 
 		default:
@@ -636,19 +672,19 @@ func (p pythonAnalyzer) emitFunc(
 					continue
 				}
 				seenEdge[funcID+"->"+id] = true
-				props := map[string]string{
-					"resolution": contract.ResAmbiguousMultiDef,
-					"confidence": contract.ConfidenceFor(contract.ResAmbiguousMultiDef),
-				}
+				score, tier, props := edgeConfidence(contract.ResAmbiguousMultiDef)
 				if isDecorated {
 					props = degraded(props, "decorator")
+					score, tier = confidenceFromProps(props)
 				}
 				res.Edges = append(res.Edges, contract.Edge{
-					From:       funcID,
-					To:         id,
-					Relation:   contract.RelCalls,
-					SrcFile:    relPath,
-					Properties: props,
+					From:            funcID,
+					To:              id,
+					Relation:        contract.RelCalls,
+					SrcFile:         relPath,
+					ConfidenceScore: score,
+					ConfidenceTier:  tier,
+					Properties:      props,
 				})
 			}
 		}

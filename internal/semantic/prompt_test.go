@@ -60,4 +60,28 @@ func TestExtractionSpecProseUsesBackticks(t *testing.T) {
 		"prose line must use backtick-quoted identifier to match graphify extraction-spec source verbatim")
 }
 
+// TestBuildPromptIncludesFileContent asserts that the prompt includes actual file
+// content (via FILE_CONTENT placeholder) so the tool-less LLM can perform extraction
+// against source bytes rather than filenames only (finding 1: content never placed
+// in the prompt).
+func TestBuildPromptIncludesFileContent(t *testing.T) {
+	got := BuildPrompt(PromptVars{
+		FileList:    "- auth/session.go",
+		FileContent: "// auth/session.go\npackage auth\nfunc ValidateToken() {}",
+		ChunkNum:    1,
+		TotalChunks: 1,
+	})
+	// Content must appear verbatim in the rendered prompt.
+	require.Contains(t, got, "func ValidateToken() {}")
+	// The FILE_CONTENT placeholder must be fully consumed.
+	require.NotContains(t, got, "FILE_CONTENT")
+}
+
+// TestExtractionSpecContainsFileContentPlaceholder asserts that extraction_spec.txt
+// contains the FILE_CONTENT placeholder that BuildPrompt substitutes (finding 1).
+func TestExtractionSpecContainsFileContentPlaceholder(t *testing.T) {
+	require.Contains(t, extractionSpec, "FILE_CONTENT",
+		"extraction_spec.txt must contain FILE_CONTENT placeholder for source bytes")
+}
+
 var _ = strings.Contains // ensure import used

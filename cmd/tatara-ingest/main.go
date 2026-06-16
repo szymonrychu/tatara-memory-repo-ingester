@@ -39,6 +39,7 @@ func realMain() error {
 		o.baseURL = cfg.BaseURL
 	}
 	o.pollInterval = cfg.PollInterval
+	o.httpTimeout = cfg.HTTPTimeout
 	o.crossRepoPrefix = cfg.CrossRepoPrefix
 	o.metricsPushURL = cfg.MetricsPushURL
 

@@ -15,19 +15,22 @@ var extractionSpec string
 // PromptVars are the placeholder substitutions for the extraction prompt.
 type PromptVars struct {
 	FileList    string
+	FileContent string // full source bytes for every file in the chunk, fenced by path
 	ChunkNum    int
 	TotalChunks int
 }
 
 // BuildPrompt returns the verbatim extraction-spec prompt with FILE_LIST,
-// CHUNK_NUM, and TOTAL_CHUNKS substituted. DEEP_MODE is always off.
-// strings.NewReplacer uses longest-leftmost matching, so argument order does
-// not affect correctness; TOTAL_CHUNKS and CHUNK_NUM cannot partially collide.
+// FILE_CONTENT, CHUNK_NUM, and TOTAL_CHUNKS substituted. DEEP_MODE is always
+// off. strings.NewReplacer uses longest-leftmost matching, so argument order
+// does not affect correctness; TOTAL_CHUNKS and CHUNK_NUM cannot partially
+// collide.
 func BuildPrompt(v PromptVars) string {
 	r := strings.NewReplacer(
 		"TOTAL_CHUNKS", strconv.Itoa(v.TotalChunks),
 		"CHUNK_NUM", strconv.Itoa(v.ChunkNum),
 		"FILE_LIST", v.FileList,
+		"FILE_CONTENT", v.FileContent,
 	)
 	return r.Replace(extractionSpec)
 }

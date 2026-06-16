@@ -367,6 +367,75 @@ func TestCompleteJitterFracZeroDisablesJitter(t *testing.T) {
 	// No assertion on exact timing; this test mainly confirms no panic when jitterFrac=0.
 }
 
+// TestNon2xxBodyFullyDrained verifies that the client drains the response body
+// after reading the truncated error snippet so net/http can reuse the
+// keep-alive connection on the retry path.
+func TestNon2xxBodyFullyDrained(t *testing.T) {
+	// Build a body larger than the 2048-byte limit read by the error path so
+	// we can detect whether the remainder was consumed.
+	largeBody := make([]byte, 4096)
+	for i := range largeBody {
+		largeBody[i] = 'x'
+	}
+
+	var bodyFullyRead bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503)
+		_, _ = w.Write(largeBody)
+	}))
+	defer srv.Close()
+
+	// Wrap the transport so we can observe whether the body was drained before
+	// the connection was returned to the pool. We do this by checking that a
+	// second request reuses the same connection (keep-alive only works when the
+	// body is fully consumed). We track connection reuse via a counter on the
+	// server side: if the second request arrives on a new connection the server
+	// handler will be called from a new goroutine but the transport will open a
+	// fresh TCP conn. Instead, use a simpler proxy: replace resp.Body with a
+	// custom reader that records EOF.
+	type trackingBody struct {
+		io.ReadCloser
+		drained *bool
+	}
+	realTransport := &http.Transport{}
+	trackTransport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		resp, err := realTransport.RoundTrip(req)
+		if err != nil {
+			return nil, err
+		}
+		drained := false
+		orig := resp.Body
+		resp.Body = &bodyTracker{ReadCloser: orig, drained: &drained}
+		bodyFullyRead = false
+		_ = trackingBody{ReadCloser: orig, drained: &bodyFullyRead}
+		// swap in tracker
+		resp.Body = &bodyTracker{ReadCloser: orig, drained: &bodyFullyRead}
+		return resp, nil
+	})
+
+	c := New(Config{APIKey: "k", Model: "m", BaseURL: srv.URL}, &http.Client{Transport: trackTransport})
+	_, err := c.Complete(context.Background(), "x")
+	require.Error(t, err)
+	require.True(t, bodyFullyRead, "non-2xx response body must be fully drained so the connection can be reused")
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type bodyTracker struct {
+	io.ReadCloser
+	drained *bool
+}
+
+func (b *bodyTracker) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF {
+		*b.drained = true
+	}
+	return n, err
+}
+
 func TestConfigFromEnvDefaults(t *testing.T) {
 	cfg := ConfigFromEnv(func(k string) string {
 		switch k {

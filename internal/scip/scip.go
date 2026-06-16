@@ -35,6 +35,18 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 		fileSet  = make(map[string]struct{})
 	)
 
+	// realEntityIDs holds every entity ID emitted from a Definition occurrence,
+	// across ALL documents. A symbol may be referenced in one document and defined
+	// in another; without a global set the per-document placeholder logic would
+	// emit a scip_external placeholder AND the real entity for the same ID,
+	// producing duplicate rows that clobber the real entity on reconcile.
+	realEntityIDs := make(map[string]struct{})
+	// placeholderCandidates collects external edge targets that had no local
+	// definition in their own document. Keyed by entity ID so cross-document
+	// duplicates collapse. Emitted after the loop, but only for IDs that never
+	// got a real entity anywhere in the index.
+	placeholderCandidates := make(map[string]contract.Entity)
+
 	// Build a top-level symInfo from Index.ExternalSymbols so that external
 	// (imported/cross-package) symbol kinds are available when classifying
 	// reference edges. Per-document Symbols are overlaid on top below.
@@ -83,17 +95,27 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 			}
 		}
 
-		// Emit one entity per definition.
-		defBySymbol := make(map[string]*scipbindings.Occurrence, len(defs))
+		// seenEntityIDs deduplicates entity rows within this document; a symbol
+		// may appear as a Definition occurrence more than once (e.g. forward
+		// declaration + definition, or an indexer that re-emits the same def).
+		seenEntityIDs := make(map[string]struct{}, len(defs))
+
+		// Emit one entity per definition, deduplicating by entity ID.
 		for _, d := range defs {
-			defBySymbol[d.Symbol] = d
+			eid := entityID(lang, d.Symbol)
+			if _, seen := seenEntityIDs[eid]; seen {
+				continue
+			}
+			seenEntityIDs[eid] = struct{}{}
+			realEntityIDs[eid] = struct{}{}
+
 			// Prefer EnclosingRange for full body span; fall back to Range.
 			lineStart, lineEnd := occLineStartEnd(bestRange(d))
 			si, ok := symInfo[d.Symbol]
 			if !ok {
 				// No SymbolInformation: emit a minimal entity.
 				entities = append(entities, contract.Entity{
-					ID:        entityID(lang, d.Symbol),
+					ID:        eid,
 					Name:      lastComponent(d.Symbol),
 					Type:      "scip_symbol",
 					FilePath:  doc.RelativePath,
@@ -111,7 +133,7 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 			}
 			kind := si.Kind
 			entities = append(entities, contract.Entity{
-				ID:        entityID(lang, si.Symbol),
+				ID:        eid,
 				Name:      displayName(si),
 				Type:      scipKind(kind),
 				FilePath:  doc.RelativePath,
@@ -150,6 +172,28 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 			}
 			seenEdges[ek] = struct{}{}
 
+			// If the To entity has no local entity in this document, record a
+			// placeholder candidate so the edge target resolves and the graph has
+			// no dangling edges. Emission is deferred to a post-loop pass that drops
+			// any candidate whose ID later (or in another document) got a real
+			// entity, preventing duplicate rows for the same ID.
+			if _, exists := seenEntityIDs[ek.to]; !exists {
+				if _, queued := placeholderCandidates[ek.to]; !queued {
+					name := lastComponent(ref.Symbol)
+					if extSI, extOK := symInfo[ref.Symbol]; extOK && extSI.DisplayName != "" {
+						name = extSI.DisplayName
+					}
+					placeholderCandidates[ek.to] = contract.Entity{
+						ID:   ek.to,
+						Name: name,
+						Type: "scip_external",
+						Properties: map[string]string{
+							"scip_kind": "external",
+						},
+					}
+				}
+			}
+
 			// SCIP type resolution is compiler-grade: use score=1.0 so edges rank
 			// as EXTRACTED, matching the certainty of AST-extracted facts.
 			const confScore = 1.0
@@ -166,6 +210,21 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 				},
 			})
 		}
+	}
+
+	// Emit placeholder entities for external edge targets, but only for IDs that
+	// never got a real entity anywhere in the index. Sorted for deterministic
+	// output (the candidate map iteration order is otherwise random).
+	placeholderIDs := make([]string, 0, len(placeholderCandidates))
+	for id := range placeholderCandidates {
+		if _, real := realEntityIDs[id]; real {
+			continue
+		}
+		placeholderIDs = append(placeholderIDs, id)
+	}
+	sort.Strings(placeholderIDs)
+	for _, id := range placeholderIDs {
+		entities = append(entities, placeholderCandidates[id])
 	}
 
 	files := make([]string, 0, len(fileSet))

@@ -38,7 +38,7 @@ func (j jsAnalyzer) Match(path string) bool {
 // The repo-wide resolution index is built from ALL .js/.mjs/.cjs files found under repoRoot
 // so that incremental ingest (where `files` is a diff subset) still resolves cross-file edges.
 // Entities, edges, and chunks are only emitted for files in `files`.
-func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) (Result, error) {
+func (j jsAnalyzer) Analyze(ctx context.Context, repoRoot string, files []string) (Result, error) {
 	lang := javascript.GetLanguage()
 
 	type parsedFile struct {
@@ -60,16 +60,25 @@ func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) 
 
 	allParsed := make([]parsedFile, 0, len(allJSFiles))
 	for _, relPath := range allJSFiles {
+		if err := ctx.Err(); err != nil {
+			return Result{}, fmt.Errorf("analyze cancelled: %w", err)
+		}
 		absPath := filepath.Join(repoRoot, relPath)
 		src, err := os.ReadFile(absPath) //nolint:gosec
 		if err != nil {
-			return Result{}, fmt.Errorf("read %q: %w", absPath, err)
+			j.log.Warn("javascript: read failed; skipping", slog.String("file", relPath), slog.String("err", err.Error()))
+			if diffSet[relPath] {
+				res.ParseErrors++
+				res.FailedFiles = append(res.FailedFiles, relPath)
+			}
+			continue
 		}
-		root, err := sitter.ParseCtx(context.Background(), src, lang)
+		root, err := sitter.ParseCtx(ctx, src, lang)
 		if err != nil {
 			j.log.Warn("tree-sitter parse error", slog.String("file", relPath), slog.String("err", err.Error()))
 			if diffSet[relPath] {
 				res.ParseErrors++
+				res.FailedFiles = append(res.FailedFiles, relPath)
 			}
 			continue
 		}
@@ -465,15 +474,19 @@ func (j jsAnalyzer) processFile(
 			rawSource := jsStringValue(srcNode, src)
 			resolved := resolveModulePath(fileDir, rawSource)
 			if strings.HasPrefix(rawSource, ".") {
-				targetID := moduleID(resolved)
-				if !emittedImports[targetID] {
-					emittedImports[targetID] = true
-					res.Edges = append(res.Edges, contract.Edge{
-						From:     modID,
-						To:       targetID,
-						Relation: contract.RelImports,
-						SrcFile:  relPath,
-					})
+				// Only emit the imports edge when the target module is known in this repo
+				// (mirrors the require path guard in jsCollectRequireImports - finding 3).
+				if moduleSet[resolved] {
+					targetID := moduleID(resolved)
+					if !emittedImports[targetID] {
+						emittedImports[targetID] = true
+						res.Edges = append(res.Edges, contract.Edge{
+							From:     modID,
+							To:       targetID,
+							Relation: contract.RelImports,
+							SrcFile:  relPath,
+						})
+					}
 				}
 			} else if !seenExternal[rawSource] {
 				// Bare specifier not in-repo -> requires SymbolRow.
@@ -681,7 +694,9 @@ func (j jsAnalyzer) emitFunc(
 	}
 
 	danglingCalls := []string{}
+	seenDangling := map[string]bool{}
 	degradedReasons := []string{}
+	seenDegradedReason := map[string]bool{}
 	seenEdge := map[string]bool{}
 
 	jsWalkCalls(bodyNode, src, func(callNode *sitter.Node, callee *sitter.Node) {
@@ -689,14 +704,25 @@ func (j jsAnalyzer) emitFunc(
 		// call_expression where function is subscript_expression.
 		if callee.Type() == "subscript_expression" {
 			// Dynamic: obj[expr]() - cannot resolve statically.
-			danglingCalls = append(danglingCalls, callee.Content(src))
-			degradedReasons = append(degradedReasons, "dynamic")
+			name := callee.Content(src)
+			if !seenDangling[name] {
+				seenDangling[name] = true
+				danglingCalls = append(danglingCalls, name)
+			}
+			if !seenDegradedReason["dynamic"] {
+				seenDegradedReason["dynamic"] = true
+				degradedReasons = append(degradedReasons, "dynamic")
+			}
 			return
 		}
 
 		// member_expression call (obj.method): treat as dangling.
 		if callee.Type() == "member_expression" {
-			danglingCalls = append(danglingCalls, callee.Content(src))
+			name := callee.Content(src)
+			if !seenDangling[name] {
+				seenDangling[name] = true
+				danglingCalls = append(danglingCalls, name)
+			}
 			return
 		}
 
@@ -709,37 +735,44 @@ func (j jsAnalyzer) emitFunc(
 				return
 			}
 			seenEdge[edgeKey] = true
-			props := map[string]string{
-				"resolution": contract.ResScopedNameMatch,
-				"confidence": contract.ConfidenceFor(contract.ResScopedNameMatch),
-			}
+			score, tier, props := edgeConfidence(contract.ResScopedNameMatch)
 			res.Edges = append(res.Edges, contract.Edge{
-				From:       fid,
-				To:         calleeID,
-				Relation:   contract.RelCalls,
-				SrcFile:    relPath,
-				Properties: props,
+				From:            fid,
+				To:              calleeID,
+				Relation:        contract.RelCalls,
+				SrcFile:         relPath,
+				ConfidenceScore: score,
+				ConfidenceTier:  tier,
+				Properties:      props,
 			})
 			return
 		}
 
 		// Tier 2: imported_name_match - resolves via tracked import.
 		if calleeID, ok := importMap[calleeName]; ok {
+			// A require()-bound binding maps to a js:module: ID; a module is not
+			// callable, so skip it here (treat as dangling) - finding 8.
+			if strings.HasPrefix(calleeID, "js:module:") {
+				if !seenDangling[calleeName] {
+					seenDangling[calleeName] = true
+					danglingCalls = append(danglingCalls, calleeName)
+				}
+				return
+			}
 			edgeKey := fid + "->" + calleeID
 			if seenEdge[edgeKey] {
 				return
 			}
 			seenEdge[edgeKey] = true
-			props := map[string]string{
-				"resolution": contract.ResImportedNameMatch,
-				"confidence": contract.ConfidenceFor(contract.ResImportedNameMatch),
-			}
+			score, tier, props := edgeConfidence(contract.ResImportedNameMatch)
 			res.Edges = append(res.Edges, contract.Edge{
-				From:       fid,
-				To:         calleeID,
-				Relation:   contract.RelCalls,
-				SrcFile:    relPath,
-				Properties: props,
+				From:            fid,
+				To:              calleeID,
+				Relation:        contract.RelCalls,
+				SrcFile:         relPath,
+				ConfidenceScore: score,
+				ConfidenceTier:  tier,
+				Properties:      props,
 			})
 			return
 		}
@@ -748,21 +781,23 @@ func (j jsAnalyzer) emitFunc(
 		ids := repoIndex[calleeName]
 		switch len(ids) {
 		case 0:
-			danglingCalls = append(danglingCalls, calleeName)
+			if !seenDangling[calleeName] {
+				seenDangling[calleeName] = true
+				danglingCalls = append(danglingCalls, calleeName)
+			}
 		case 1:
 			edgeKey := fid + "->" + ids[0]
 			if !seenEdge[edgeKey] {
 				seenEdge[edgeKey] = true
-				props := map[string]string{
-					"resolution": contract.ResGlobalNameMatch,
-					"confidence": contract.ConfidenceFor(contract.ResGlobalNameMatch),
-				}
+				score, tier, props := edgeConfidence(contract.ResGlobalNameMatch)
 				res.Edges = append(res.Edges, contract.Edge{
-					From:       fid,
-					To:         ids[0],
-					Relation:   contract.RelCalls,
-					SrcFile:    relPath,
-					Properties: props,
+					From:            fid,
+					To:              ids[0],
+					Relation:        contract.RelCalls,
+					SrcFile:         relPath,
+					ConfidenceScore: score,
+					ConfidenceTier:  tier,
+					Properties:      props,
 				})
 			}
 		default:
@@ -772,16 +807,15 @@ func (j jsAnalyzer) emitFunc(
 					continue
 				}
 				seenEdge[edgeKey] = true
-				props := map[string]string{
-					"resolution": contract.ResAmbiguousMultiDef,
-					"confidence": contract.ConfidenceFor(contract.ResAmbiguousMultiDef),
-				}
+				score, tier, props := edgeConfidence(contract.ResAmbiguousMultiDef)
 				res.Edges = append(res.Edges, contract.Edge{
-					From:       fid,
-					To:         id,
-					Relation:   contract.RelCalls,
-					SrcFile:    relPath,
-					Properties: props,
+					From:            fid,
+					To:              id,
+					Relation:        contract.RelCalls,
+					SrcFile:         relPath,
+					ConfidenceScore: score,
+					ConfidenceTier:  tier,
+					Properties:      props,
 				})
 			}
 		}

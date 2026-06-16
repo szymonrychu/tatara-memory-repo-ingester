@@ -807,6 +807,147 @@ func TestSCIPEmitsNoSymbolRows(t *testing.T) {
 		"SCIP must not emit any SymbolRows (cross-repo monikers deferred to ROADMAP)")
 }
 
+// TestExternalSymbolEdgeHasEntity verifies round-2 finding 1: an edge whose
+// To endpoint is an external symbol must have a corresponding placeholder entity
+// so the graph has no dangling edges. The entity ID must match the edge's To field.
+func TestExternalSymbolEdgeHasEntity(t *testing.T) {
+	const (
+		symLocal = "go 1.0 `pkg`/Caller()."
+		symExt   = "go 1.0 `ext`/ExtFn()."
+	)
+	idx := &scipbindings.Index{
+		ExternalSymbols: []*scipbindings.SymbolInformation{
+			{Symbol: symExt, Kind: scipbindings.SymbolInformation_Function, DisplayName: "ExtFn"},
+		},
+		Documents: []*scipbindings.Document{
+			{
+				RelativePath: "caller.go",
+				Language:     "go",
+				Symbols: []*scipbindings.SymbolInformation{
+					{Symbol: symLocal, Kind: scipbindings.SymbolInformation_Function, DisplayName: "Caller"},
+				},
+				Occurrences: []*scipbindings.Occurrence{
+					{
+						Range:          []int32{0, 5, 0, 11},
+						EnclosingRange: []int32{0, 0, 8, 0},
+						Symbol:         symLocal,
+						SymbolRoles:    int32(scipbindings.SymbolRole_Definition),
+					},
+					{Range: []int32{3, 0, 3, 5}, Symbol: symExt, SymbolRoles: 0},
+				},
+			},
+		},
+	}
+
+	gp, err := scip.Parse(writeIndex(t, idx), "repo")
+	require.NoError(t, err)
+
+	// Edge must still be emitted (existing behaviour preserved).
+	require.Len(t, gp.Edges, 1)
+	edge := gp.Edges[0]
+	assert.Equal(t, "scip:go:"+symExt, edge.To)
+
+	// The To entity must exist so the edge is not dangling.
+	byID := make(map[string]contract.Entity)
+	for _, e := range gp.Entities {
+		byID[e.ID] = e
+	}
+	assert.Contains(t, byID, edge.To,
+		"entity for external symbol must be emitted to prevent dangling edge")
+}
+
+// TestCrossDocPlaceholderVsRealDef guards against a regression in the dangling-edge
+// placeholder fix: a symbol referenced in one document and DEFINED in another must
+// yield exactly one entity (the real definition), never a scip_external placeholder
+// duplicate that would clobber the real row on the server reconcile.
+func TestCrossDocPlaceholderVsRealDef(t *testing.T) {
+	const (
+		symCaller = "go 1.0 `a`/Caller()."
+		symX      = "go 1.0 `b`/X()."
+	)
+	idx := &scipbindings.Index{
+		Documents: []*scipbindings.Document{
+			{
+				RelativePath: "a.go",
+				Language:     "go",
+				Symbols: []*scipbindings.SymbolInformation{
+					{Symbol: symCaller, Kind: scipbindings.SymbolInformation_Function, DisplayName: "Caller"},
+				},
+				Occurrences: []*scipbindings.Occurrence{
+					{Range: []int32{0, 5, 0, 11}, EnclosingRange: []int32{0, 0, 8, 0}, Symbol: symCaller, SymbolRoles: int32(scipbindings.SymbolRole_Definition)},
+					{Range: []int32{3, 0, 3, 5}, Symbol: symX, SymbolRoles: 0},
+				},
+			},
+			{
+				RelativePath: "b.go",
+				Language:     "go",
+				Symbols: []*scipbindings.SymbolInformation{
+					{Symbol: symX, Kind: scipbindings.SymbolInformation_Function, DisplayName: "X"},
+				},
+				Occurrences: []*scipbindings.Occurrence{
+					{Range: []int32{0, 5, 0, 6}, EnclosingRange: []int32{0, 0, 4, 0}, Symbol: symX, SymbolRoles: int32(scipbindings.SymbolRole_Definition)},
+				},
+			},
+		},
+	}
+	gp, err := scip.Parse(writeIndex(t, idx), "repo")
+	require.NoError(t, err)
+
+	var matches []contract.Entity
+	for _, e := range gp.Entities {
+		if e.ID == "scip:go:"+symX {
+			matches = append(matches, e)
+		}
+	}
+	require.Len(t, matches, 1, "a symbol defined in one doc + referenced in another must yield exactly one entity")
+	assert.Equal(t, "scip_function", matches[0].Type, "the real definition must win over the placeholder")
+	assert.Equal(t, "b.go", matches[0].FilePath, "the surviving entity must be the real one with a FilePath")
+}
+
+// TestDuplicateDefinitionEntityDedup verifies round-2 finding 2: when a symbol
+// appears as a Definition occurrence more than once in a document, only one
+// entity row with that ID is emitted (no duplicates inflate the count).
+func TestDuplicateDefinitionEntityDedup(t *testing.T) {
+	const sym = "go 1.0 `pkg`/Dup()."
+	idx := &scipbindings.Index{
+		Documents: []*scipbindings.Document{
+			{
+				RelativePath: "dup.go",
+				Language:     "go",
+				Symbols: []*scipbindings.SymbolInformation{
+					{Symbol: sym, Kind: scipbindings.SymbolInformation_Function, DisplayName: "Dup"},
+				},
+				Occurrences: []*scipbindings.Occurrence{
+					// Same symbol emitted twice as Definition (forward decl + definition).
+					{
+						Range:          []int32{0, 5, 0, 8},
+						EnclosingRange: []int32{0, 0, 5, 0},
+						Symbol:         sym,
+						SymbolRoles:    int32(scipbindings.SymbolRole_Definition),
+					},
+					{
+						Range:          []int32{10, 5, 10, 8},
+						EnclosingRange: []int32{10, 0, 20, 0},
+						Symbol:         sym,
+						SymbolRoles:    int32(scipbindings.SymbolRole_Definition),
+					},
+				},
+			},
+		},
+	}
+
+	gp, err := scip.Parse(writeIndex(t, idx), "repo")
+	require.NoError(t, err)
+
+	count := 0
+	for _, e := range gp.Entities {
+		if e.ID == "scip:go:"+sym {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "duplicate Definition occurrences must not produce duplicate entity rows")
+}
+
 // TestEmptyRelativePathSkipped verifies finding 11: documents with empty
 // RelativePath are skipped and do not produce empty-string file entries.
 func TestEmptyRelativePathSkipped(t *testing.T) {
