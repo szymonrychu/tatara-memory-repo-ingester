@@ -176,6 +176,7 @@ func (c *Client) try(ctx context.Context, body []byte) (content string, retry bo
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		_, _ = io.Copy(io.Discard, resp.Body)
 		transient := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
 		wait = parseRetryAfter(resp.Header.Get("Retry-After"))
 		return "", transient, wait, fmt.Errorf("openai status %d: %s", resp.StatusCode, string(b))
