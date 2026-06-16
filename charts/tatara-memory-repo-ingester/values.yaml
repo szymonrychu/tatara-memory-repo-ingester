@@ -5,7 +5,7 @@ ttlSecondsAfterFinished: 3600
 activeDeadlineSeconds: 7200
 
 image:
-  repository: "harbor.szymonrichert.pl/containers/tatara-memory-repo-ingester"
+  repository: ""
   tag: ""
   pullPolicy: IfNotPresent
 
@@ -16,6 +16,7 @@ oidcAudience: ""
 repoName: ""
 repoRoot: ""
 metricsPushUrl: ""
+crossRepoPrefix: ""
 
 resources:
   requests:

@@ -61,4 +61,5 @@ OIDC_AUDIENCE: {{ .Values.oidcAudience | quote }}
 REPO_NAME: {{ .Values.repoName | quote }}
 REPO_ROOT: {{ .Values.repoRoot | quote }}
 METRICS_PUSH_URL: {{ .Values.metricsPushUrl | quote }}
+CROSS_REPO_PREFIX: {{ .Values.crossRepoPrefix | quote }}
 {{- end }}
