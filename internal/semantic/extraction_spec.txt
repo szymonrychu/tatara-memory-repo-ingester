@@ -4,6 +4,9 @@ Output ONLY valid JSON matching the schema below - no explanation, no markdown f
 Files (chunk CHUNK_NUM of TOTAL_CHUNKS):
 FILE_LIST
 
+File contents:
+FILE_CONTENT
+
 Rules:
 - EXTRACTED: relationship explicit in source (import, call, citation, "see §3.2")
 - INFERRED: reasonable inference (shared data structure, implied dependency)

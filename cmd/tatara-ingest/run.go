@@ -375,13 +375,22 @@ func runSemantic(ctx context.Context, o options, cl *push.Client, commit string,
 // failure (logged WARN), so the caller drops that chunk's contribution.
 func extractChunk(ctx context.Context, repo string, client *llm.Client, ck semantic.FileChunk, chunkNum, total int) (analyze.Result, bool) {
 	var fl strings.Builder
+	var fc strings.Builder
+	validFiles := make(map[string]struct{}, len(ck.Files))
 	for _, f := range ck.Files {
 		fl.WriteString("- ")
 		fl.WriteString(f.Path)
 		fl.WriteString("\n")
+		fc.WriteString("### ")
+		fc.WriteString(f.Path)
+		fc.WriteString("\n```\n")
+		fc.WriteString(f.Content)
+		fc.WriteString("\n```\n")
+		validFiles[f.Path] = struct{}{}
 	}
 	prompt := semantic.BuildPrompt(semantic.PromptVars{
 		FileList:    strings.TrimRight(fl.String(), "\n"),
+		FileContent: strings.TrimRight(fc.String(), "\n"),
 		ChunkNum:    chunkNum,
 		TotalChunks: total,
 	})
@@ -390,7 +399,7 @@ func extractChunk(ctx context.Context, repo string, client *llm.Client, ck seman
 		slog.Warn("semantic LLM call failed; skipping chunk", "repo", repo, "chunk", chunkNum, "error", err) //nolint:gosec // G706: repo and err are internal values, not HTTP input
 		return analyze.Result{}, false
 	}
-	res, err := semantic.ParseFragment(repo, []byte(out))
+	res, err := semantic.ParseFragment(repo, []byte(out), validFiles)
 	if err != nil {
 		slog.Warn("semantic parse failed; skipping chunk", "repo", repo, "chunk", chunkNum, "error", err) //nolint:gosec // G706: repo and err are internal values, not HTTP input
 		return analyze.Result{}, false
