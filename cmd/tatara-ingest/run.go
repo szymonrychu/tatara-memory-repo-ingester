@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -107,12 +108,26 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 	reg := analyze.Default(o.crossRepoPrefix, o.repoRoot)
 	groups := reg.Group(analyzeFiles)
 
-	// failedFiles tracks A/M/R files whose analyzer errored. These files must be
-	// excluded from the reconcile set so the server does not purge their existing
-	// chunks when no replacement was produced (transient parse errors cause data
-	// loss otherwise). Deleted files are unaffected: they never go through analyze
-	// and must always be reconciled.
+	// failedFiles tracks A/M/R files an analyzer skipped via a per-file soft error
+	// (res.FailedFiles: an unreadable or unparseable single file). These files must
+	// be excluded from the reconcile set so the server does not purge their existing
+	// chunks when no replacement was produced. These soft errors stay tolerant: they
+	// are deterministic and file-local, and failing on them would wedge ingestion
+	// forever on a permanently-malformed file. Deleted files are unaffected: they
+	// never go through analyze and must always be reconciled.
 	failedFiles := make(map[string]struct{})
+
+	// incomplete is set when an analyzer hard-errors (whole-batch failure, e.g. a
+	// go/packages load fault or a recovered tree-sitter error). A hard failure means
+	// that analyzer's files contribute no entities/edges/chunks, so pushing now would
+	// reconcile-purge their stale rows with no replacement - a destructive partial
+	// graph - and the operator would advance HEAD past it, leaving a permanent hole
+	// no incremental ingest revisits. We fail the run before any push (fail-closed):
+	// the operator leaves LastIngestedCommit unchanged and re-ingests the same window
+	// on its next reconcile, bounded by its existing ingest backoff. A silent
+	// permanent gap becomes a loud, alertable, retried failure.
+	var incomplete bool
+	var firstAnalyzerErr error
 
 	var agg analyze.Result
 	for _, a := range reg.Analyzers() {
@@ -126,8 +141,9 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 		if err != nil {
 			slog.Warn("analyzer failed", "analyzer", a.Name(), "error", err)
 			m.AnalyzerParseErrorsTotal.WithLabelValues(a.Name()).Inc()
-			for _, f := range fs {
-				failedFiles[f] = struct{}{}
+			incomplete = true
+			if firstAnalyzerErr == nil {
+				firstAnalyzerErr = fmt.Errorf("analyzer %s: %w", a.Name(), err)
 			}
 			continue
 		}
@@ -154,6 +170,14 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 		agg.Chunks = append(agg.Chunks, res.Chunks...)
 		agg.Symbols = append(agg.Symbols, res.Symbols...)
 		agg.Hyperedges = append(agg.Hyperedges, res.Hyperedges...)
+	}
+
+	// Fail-closed: a hard analyzer error means the AST graph is known-incomplete.
+	// Refuse to push (a partial reconcile would purge the failed files' rows) and
+	// return non-nil so the Job exits non-zero and the operator retries the same
+	// window. Per-file soft errors (failedFiles) do not trip this gate.
+	if incomplete {
+		return fmt.Errorf("ingest incomplete, refusing destructive partial push: %w", firstAnalyzerErr)
 	}
 
 	if len(touched) == 0 {
