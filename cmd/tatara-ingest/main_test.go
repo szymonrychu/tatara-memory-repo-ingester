@@ -54,6 +54,46 @@ func TestResolveOptions_ExplicitRepoName(t *testing.T) {
 	}
 }
 
+// TestOIDCValidation_MissingIssuerFails verifies finding 5: when oidc-client-id
+// is set but oidc-issuer is empty, realMain must return a clear config error
+// before making any HTTP call (fail-fast, not a lazy oauth2 error on first push).
+func TestOIDCValidation_MissingIssuerFails(t *testing.T) {
+	// We test validateOIDCConfig directly since realMain wires env and flags.
+	err := validateOIDCConfig("my-client-id", "", "my-secret")
+	if err == nil {
+		t.Fatal("expected error when oidc-client-id is set but oidc-issuer is empty")
+	}
+}
+
+func TestOIDCValidation_MissingSecretFails(t *testing.T) {
+	err := validateOIDCConfig("my-client-id", "https://auth.example.com", "")
+	if err == nil {
+		t.Fatal("expected error when oidc-client-id is set but oidc-client-secret is empty")
+	}
+}
+
+func TestOIDCValidation_InvalidIssuerURLFails(t *testing.T) {
+	err := validateOIDCConfig("my-client-id", "not-a-url", "my-secret")
+	if err == nil {
+		t.Fatal("expected error when oidc-issuer is not a valid URL")
+	}
+}
+
+func TestOIDCValidation_ValidConfigPasses(t *testing.T) {
+	err := validateOIDCConfig("my-client-id", "https://auth.example.com", "my-secret")
+	if err != nil {
+		t.Fatalf("unexpected error for valid OIDC config: %v", err)
+	}
+}
+
+func TestOIDCValidation_NoClientIDSkips(t *testing.T) {
+	// When client-id is empty, no validation is needed regardless of other fields.
+	err := validateOIDCConfig("", "", "")
+	if err != nil {
+		t.Fatalf("unexpected error when oidc-client-id is empty: %v", err)
+	}
+}
+
 // TestResolveOptions_GetenvWired verifies finding 5: resolveOptions must wire
 // its getenv parameter into o.getenv so production code and tests share the same
 // env source rather than leaving o.getenv nil in prod (which hides the source).

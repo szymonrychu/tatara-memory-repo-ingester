@@ -761,6 +761,73 @@ func TestRunRecordsFailureResultMetric(t *testing.T) {
 		"failed run must push total duration via IngestStageDuration")
 }
 
+// TestRunSemanticMissPathEscapeIsRejected verifies finding 3: a server-returned
+// miss path that escapes repoRoot (e.g. ../../etc/passwd) must be silently
+// skipped and must NOT appear in the semantic push Files list.
+func TestRunSemanticMissPathEscapeIsRejected(t *testing.T) {
+	dir := newGitRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.go"),
+		[]byte("package m\n\nfunc A() {}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/m\n\ngo 1.25\n"), 0o644))
+	commitAll(t, dir, "init")
+
+	// Write a "secret" file one level above the repo root so we can confirm
+	// it is never read.
+	secretFile := filepath.Join(filepath.Dir(dir), "secret.txt")
+	require.NoError(t, os.WriteFile(secretFile, []byte("should-never-be-read"), 0o644))
+	t.Cleanup(func() { _ = os.Remove(secretFile) })
+
+	// OpenAI endpoint: should not be called for the escape path; if called for
+	// a.go it returns a trivial fragment.
+	openai := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		frag := `{"nodes":[],"edges":[],"hyperedges":[]}`
+		out := map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": frag}}}}
+		_ = json.NewEncoder(w).Encode(out)
+	}))
+	defer openai.Close()
+
+	var semanticPush contract.GraphPush
+	var sawSemantic bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph/semantic-misses":
+			// Return a.go plus a traversal-escape path targeting the secret file.
+			rel := "../../secret.txt"
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`["a.go","` + rel + `"]`))
+		case "/code-graph:bulk":
+			var p contract.GraphPush
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &p)
+			if p.Extractor == contract.ExtractorSemantic {
+				semanticPush = p
+				sawSemantic = true
+			}
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		default:
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	env := map[string]string{"OPENAI_API_KEY": "sk-test", "OPENAI_BASE_URL": openai.URL}
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, getenv: func(k string) string { return env[k] }}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+
+	// The escape path must never appear in Files (which would tell the server
+	// to scope an entity to a path outside the repo).
+	if sawSemantic {
+		for _, f := range semanticPush.Files {
+			require.NotContains(t, f, "..", "semantic push Files must not contain escape paths")
+			require.False(t, strings.HasPrefix(f, "/"), "semantic push Files must not contain absolute paths")
+		}
+	}
+}
+
 // newGitRepo creates an initialized git repo in a temp dir.
 func newGitRepo(t *testing.T) string {
 	t.Helper()

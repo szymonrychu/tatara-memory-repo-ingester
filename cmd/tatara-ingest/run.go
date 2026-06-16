@@ -214,16 +214,6 @@ func headCommit(repoRoot string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// shaFor returns the content_sha for an A/M/R analyzed change in the diff.
-func shaFor(changes walk.Changes, path string) string {
-	for _, ch := range changes.Files {
-		if ch.Path == path {
-			return ch.ContentSHA
-		}
-	}
-	return ""
-}
-
 // runSemantic is the best-effort LLM extraction stage. It is a no-op when the
 // OpenAI key is unset or SEMANTIC_INGEST=false. Any failure (misses call, LLM,
 // parse, push) is logged and swallowed so it never fails the AST ingest.
@@ -266,19 +256,31 @@ func runSemantic(ctx context.Context, o options, cl *push.Client, commit string,
 		return
 	}
 
+	// Build a path->contentSHA index once for O(files) lookup below.
+	shaByPath := make(map[string]string, len(changes.Files))
+	for _, ch := range changes.Files {
+		shaByPath[ch.Path] = ch.ContentSHA
+	}
+
 	// Load miss-file contents and chunk them.
+	repoRootAbs := filepath.Clean(o.repoRoot)
 	var loaded []semantic.LoadedFile
 	var loadedPaths []string
 	fileSHAs := map[string]string{}
 	for _, p := range misses {
-		b, err := os.ReadFile(filepath.Join(o.repoRoot, p)) //nolint:gosec
+		clean := filepath.Clean(filepath.Join(repoRootAbs, p))
+		if !strings.HasPrefix(clean, repoRootAbs+string(os.PathSeparator)) {
+			slog.Warn("semantic: miss path escapes repoRoot; skipping", "file", p, "repoRoot", repoRootAbs)
+			continue
+		}
+		b, err := os.ReadFile(clean) //nolint:gosec
 		if err != nil {
 			slog.Warn("semantic: unreadable miss file; skipping", "file", p, "error", err)
 			continue
 		}
 		loaded = append(loaded, semantic.LoadedFile{Path: p, Content: string(b)})
 		loadedPaths = append(loadedPaths, p)
-		fileSHAs[p] = shaFor(changes, p)
+		fileSHAs[p] = shaByPath[p]
 	}
 	if len(loaded) == 0 {
 		return
