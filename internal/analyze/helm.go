@@ -19,40 +19,58 @@ import (
 )
 
 type helmAnalyzer struct {
-	log      *slog.Logger
-	repoRoot string // optional; when set, Match validates Chart.yaml presence on disk for templates/
+	log            *slog.Logger
+	repoRoot       string          // optional; when set, Match validates Chart.yaml presence on disk
+	chartRootCache map[string]bool // memoizes chartRoot->Chart.yaml-exists results (finding 2 r2)
 }
 
 // NewHelm returns the Helm chart analyzer. repoRoot is optional (empty = no disk validation in Match).
 func NewHelm(repoRoot string) Analyzer {
-	return helmAnalyzer{log: slog.Default(), repoRoot: repoRoot}
+	return helmAnalyzer{log: slog.Default(), repoRoot: repoRoot, chartRootCache: map[string]bool{}}
 }
 
 func (helmAnalyzer) Name() string { return "helm" }
 
-// Match returns true for Chart.yaml, values.yaml, or any file under a templates/ dir that
-// belongs to a real Helm chart (has a Chart.yaml sibling when repoRoot is set).
+// Match returns true for Chart.yaml, or values.yaml/templates/ files that belong to a real
+// Helm chart (has a Chart.yaml sibling on disk when repoRoot is set).
 func (ha helmAnalyzer) Match(filePath string) bool {
 	base := filepath.Base(filePath)
-	if base == "Chart.yaml" || base == "values.yaml" {
+
+	// Chart.yaml is the chart marker itself; always claim it.
+	if base == "Chart.yaml" {
 		return true
 	}
-	// templates/<file> or <chart>/templates/<file>
-	parts := strings.Split(filepath.ToSlash(filePath), "/")
-	for _, p := range parts {
-		if p == "templates" {
-			if ha.repoRoot == "" {
+
+	if ha.repoRoot == "" {
+		// No disk validation available: claim on basename alone (legacy/test mode).
+		if base == "values.yaml" {
+			return true
+		}
+		parts := strings.Split(filepath.ToSlash(filePath), "/")
+		for _, p := range parts {
+			if p == "templates" {
 				return true
 			}
-			// Disk check: only claim if the chart root dir actually has Chart.yaml.
-			chartRoot := findChartRoot(filePath)
-			chartYAMLPath := path.Join(chartRoot, "Chart.yaml")
-			absChartYAML := filepath.Join(ha.repoRoot, filepath.FromSlash(chartYAMLPath))
-			_, err := os.Stat(absChartYAML)
-			return err == nil
 		}
+		return false
 	}
-	return false
+
+	// With repoRoot set, require a Chart.yaml sibling for values.yaml and templates/ files.
+	chartRoot := findChartRoot(filePath)
+	return ha.chartRootHasChartYAML(chartRoot)
+}
+
+// chartRootHasChartYAML checks whether chartRoot contains Chart.yaml, memoizing the result.
+func (ha helmAnalyzer) chartRootHasChartYAML(chartRoot string) bool {
+	if cached, ok := ha.chartRootCache[chartRoot]; ok {
+		return cached
+	}
+	chartYAMLPath := path.Join(chartRoot, "Chart.yaml")
+	absChartYAML := filepath.Join(ha.repoRoot, filepath.FromSlash(chartYAMLPath))
+	_, err := os.Stat(absChartYAML)
+	exists := err == nil
+	ha.chartRootCache[chartRoot] = exists
+	return exists
 }
 
 // chartManifest is the subset of Chart.yaml we need.
