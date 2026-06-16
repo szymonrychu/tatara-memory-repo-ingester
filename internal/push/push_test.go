@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -407,6 +408,62 @@ func TestPushGraphPostTransientErrorRetried(t *testing.T) {
 	require.NoError(t, err, "transient 5xx on PushGraph POST must be retried")
 	require.Equal(t, 1, res.EntitiesUpserted)
 	require.GreaterOrEqual(t, calls, 2)
+}
+
+// TestNon2xxBodyFullyDrained verifies that the response body is fully drained
+// even on the non-2xx path so HTTP keep-alive connection reuse is not
+// defeated on the hottest (retry) path (finding: do() body drain on non-2xx).
+//
+// We track unique remote addresses seen by the server. If the non-2xx body
+// (> 2 KiB, beyond the LimitReader limit) is NOT drained, the transport must
+// close the poisoned connection and open a new one for the retry - resulting
+// in two distinct remote addresses. When the body IS drained the same
+// persistent connection is reused - one unique remote address.
+func TestNon2xxBodyFullyDrained(t *testing.T) {
+	var mu sync.Mutex
+	remoteAddrs := map[string]struct{}{}
+
+	// Error body larger than 2048 bytes so LimitReader leaves bytes unread
+	// unless the extra drain is present.
+	largeBody := bytes.Repeat([]byte("x"), 4096)
+	var requestCount int
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		remoteAddrs[r.RemoteAddr] = struct{}{}
+		requestCount++
+		n := requestCount
+		mu.Unlock()
+
+		if n == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write(largeBody)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(contract.PushResult{Repo: "r", EntitiesUpserted: 1})
+	}))
+	defer srv.Close()
+
+	// Force a single idle connection slot so connection reuse is observable.
+	hc := &http.Client{Transport: &http.Transport{
+		MaxIdleConnsPerHost: 1,
+		DisableKeepAlives:   false,
+	}}
+	c := push.New(srv.URL, hc, time.Millisecond)
+
+	_, err := c.PushGraph(context.Background(), contract.GraphPush{Repo: "r", Entities: []contract.Entity{{ID: "x"}}})
+	require.NoError(t, err, "retry after 5xx must succeed")
+	require.GreaterOrEqual(t, requestCount, 2, "must have retried")
+
+	mu.Lock()
+	uniqueConns := len(remoteAddrs)
+	mu.Unlock()
+
+	// With body drained, the transport reuses the existing connection: 1 addr.
+	// Without the drain, it must open a new TCP connection: 2 addrs.
+	require.Equal(t, 1, uniqueConns,
+		"non-2xx response body must be fully drained so the connection is returned to the keep-alive pool (got %d unique remote addrs)", uniqueConns)
 }
 
 // TestDoBodyDrainedAfterDecode verifies that the response body is drained
