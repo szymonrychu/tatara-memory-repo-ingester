@@ -250,3 +250,33 @@ func TestSlugLabel(t *testing.T) {
 	require.Equal(t, "a-b-c", slugLabel("a  b   c"))
 	require.Equal(t, "leadingtrailing", slugLabel("  LeadingTrailing  "))
 }
+
+// TestStripFencesTrailingBrace asserts that stripFences does not over-extend
+// when the model appends prose containing a closing brace after the JSON
+// (finding 2: LastIndex('}') captured trailing prose braces).
+func TestStripFencesTrailingBrace(t *testing.T) {
+	// Trailing prose has a brace: LastIndex would pick the prose '}' not the JSON '}'.
+	input := `{"nodes":[],"edges":[],"hyperedges":[]} Note: see {config} for details.`
+	res, err := ParseFragment("r", []byte(input))
+	require.NoError(t, err, "trailing prose with brace must not break parsing")
+	require.Empty(t, res.Entities)
+}
+
+// TestConceptIDEmptySlug asserts that nodes with punctuation-only labels get
+// distinct, non-empty ids rather than colliding on 'concept:<repo>:'
+// (finding 3: slugLabel returns ” for labels with no [a-z0-9] runes).
+func TestConceptIDEmptySlug(t *testing.T) {
+	frag := `{"nodes":[
+	  {"id":"n1","label":"!!!","file_type":"concept","source_file":"f.go"},
+	  {"id":"n2","label":"???","file_type":"rationale","source_file":"f.go"}
+	],"edges":[],"hyperedges":[]}`
+	res, err := ParseFragment("repo", []byte(frag))
+	require.NoError(t, err)
+	require.Len(t, res.Entities, 2)
+	ids := []string{res.Entities[0].ID, res.Entities[1].ID}
+	// Neither id must be the bare 'concept:repo:' collision value.
+	require.NotEqual(t, "concept:repo:", ids[0])
+	require.NotEqual(t, "concept:repo:", ids[1])
+	// The two distinct labels must produce distinct ids.
+	require.NotEqual(t, ids[0], ids[1])
+}

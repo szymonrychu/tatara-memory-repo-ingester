@@ -42,25 +42,32 @@ type options struct {
 	getenv          func(string) string
 }
 
-func run(ctx context.Context, o options, hc *http.Client) error {
+func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 	m := obs.New()
 	m.IngestRunsTotal.Inc()
+	start := time.Now()
 
 	// Short-lived Jobs cannot be scraped; push gathered metrics at job end.
 	// Best-effort: a push failure is logged and never fails the ingest. Deferred
 	// so it fires on every return path (SCIP, normal, and error exits).
-	if o.metricsPushURL != "" {
-		defer func() {
+	// Also records the terminal result counter and total duration on every path.
+	defer func() {
+		m.IngestStageDuration.WithLabelValues("total").Observe(time.Since(start).Seconds())
+		result := "success"
+		if retErr != nil {
+			result = "failure"
+		}
+		m.IngestRunResultTotal.WithLabelValues(result).Inc()
+		if o.metricsPushURL != "" {
 			if err := m.Push(ctx, o.metricsPushURL, hc); err != nil {
-				slog.Warn("metrics push failed", "url", o.metricsPushURL, "error", err)
+				slog.Error("metrics push failed", "url", o.metricsPushURL, "error", err) //nolint:gosec // G706: url and err are internal values, not HTTP input
 			}
-		}()
-	}
+		}
+	}()
 
 	if o.scipPath != "" {
 		return runSCIP(ctx, o, hc, m)
 	}
-	start := time.Now()
 	changes, err := walk.Diff(o.repoRoot, o.since, o.full)
 	if err != nil {
 		return err
@@ -155,7 +162,6 @@ func run(ctx context.Context, o options, hc *http.Client) error {
 	// Best-effort semantic stage: errors are logged and never fail the ingest.
 	runSemantic(ctx, o, cl, commit, changes, m)
 
-	m.IngestStageDuration.WithLabelValues("total").Observe(time.Since(start).Seconds())
 	slog.Info("ingest complete",
 		"repo", o.repoName, "files", len(touched),
 		"analyzed", len(analyzeFiles),
@@ -208,16 +214,6 @@ func headCommit(repoRoot string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// shaFor returns the content_sha for an A/M/R analyzed change in the diff.
-func shaFor(changes walk.Changes, path string) string {
-	for _, ch := range changes.Files {
-		if ch.Path == path {
-			return ch.ContentSHA
-		}
-	}
-	return ""
-}
-
 // runSemantic is the best-effort LLM extraction stage. It is a no-op when the
 // OpenAI key is unset or SEMANTIC_INGEST=false. Any failure (misses call, LLM,
 // parse, push) is logged and swallowed so it never fails the AST ingest.
@@ -260,19 +256,31 @@ func runSemantic(ctx context.Context, o options, cl *push.Client, commit string,
 		return
 	}
 
+	// Build a path->contentSHA index once for O(files) lookup below.
+	shaByPath := make(map[string]string, len(changes.Files))
+	for _, ch := range changes.Files {
+		shaByPath[ch.Path] = ch.ContentSHA
+	}
+
 	// Load miss-file contents and chunk them.
+	repoRootAbs := filepath.Clean(o.repoRoot)
 	var loaded []semantic.LoadedFile
 	var loadedPaths []string
 	fileSHAs := map[string]string{}
 	for _, p := range misses {
-		b, err := os.ReadFile(filepath.Join(o.repoRoot, p)) //nolint:gosec
+		clean := filepath.Clean(filepath.Join(repoRootAbs, p))
+		if !strings.HasPrefix(clean, repoRootAbs+string(os.PathSeparator)) {
+			slog.Warn("semantic: miss path escapes repoRoot; skipping", "file", p, "repoRoot", repoRootAbs)
+			continue
+		}
+		b, err := os.ReadFile(clean) //nolint:gosec
 		if err != nil {
 			slog.Warn("semantic: unreadable miss file; skipping", "file", p, "error", err)
 			continue
 		}
 		loaded = append(loaded, semantic.LoadedFile{Path: p, Content: string(b)})
 		loadedPaths = append(loadedPaths, p)
-		fileSHAs[p] = shaFor(changes, p)
+		fileSHAs[p] = shaByPath[p]
 	}
 	if len(loaded) == 0 {
 		return

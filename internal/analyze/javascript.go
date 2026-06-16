@@ -35,6 +35,9 @@ func (j jsAnalyzer) Match(path string) bool {
 }
 
 // Analyze parses each file with tree-sitter and emits entities, edges, and chunks.
+// The repo-wide resolution index is built from ALL .js/.mjs/.cjs files found under repoRoot
+// so that incremental ingest (where `files` is a diff subset) still resolves cross-file edges.
+// Entities, edges, and chunks are only emitted for files in `files`.
 func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) (Result, error) {
 	lang := javascript.GetLanguage()
 
@@ -42,12 +45,21 @@ func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) 
 		relPath string
 		src     []byte
 		root    *sitter.Node
+		defs    map[string]string
 	}
 
 	var res Result
 
-	parsed := make([]parsedFile, 0, len(files))
-	for _, relPath := range files {
+	// Walk repoRoot for all JS files to populate the repo-wide index.
+	allJSFiles := jsWalkRepo(repoRoot)
+
+	diffSet := make(map[string]bool, len(files))
+	for _, f := range files {
+		diffSet[f] = true
+	}
+
+	allParsed := make([]parsedFile, 0, len(allJSFiles))
+	for _, relPath := range allJSFiles {
 		absPath := filepath.Join(repoRoot, relPath)
 		src, err := os.ReadFile(absPath) //nolint:gosec
 		if err != nil {
@@ -56,34 +68,64 @@ func (j jsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string) 
 		root, err := sitter.ParseCtx(context.Background(), src, lang)
 		if err != nil {
 			j.log.Warn("tree-sitter parse error", slog.String("file", relPath), slog.String("err", err.Error()))
-			res.ParseErrors++
+			if diffSet[relPath] {
+				res.ParseErrors++
+			}
 			continue
 		}
-		parsed = append(parsed, parsedFile{
+		allParsed = append(allParsed, parsedFile{
 			relPath: relPath,
 			src:     src,
 			root:    root,
+			defs:    jsFileDefs(relPath, root, src),
 		})
 	}
 
-	// Build repo-wide name -> []entityID index and O(1) module-path set.
+	// Build repo-wide name -> []entityID index and O(1) module-path set from ALL files.
 	repoIndex := map[string][]string{}
-	moduleSet := make(map[string]bool, len(parsed))
-	for _, pf := range parsed {
+	moduleSet := make(map[string]bool, len(allParsed))
+	for _, pf := range allParsed {
 		moduleSet[pf.relPath] = true
-		defs := jsFileDefs(pf.relPath, pf.root, pf.src)
-		for name, id := range defs {
+		for name, id := range pf.defs {
 			repoIndex[name] = append(repoIndex[name], id)
 		}
 	}
 
-	for _, pf := range parsed {
-		moduleDefs := jsFileDefs(pf.relPath, pf.root, pf.src)
+	// Emit entities/edges/chunks only for files in the diff set.
+	for _, pf := range allParsed {
+		if !diffSet[pf.relPath] {
+			continue
+		}
 		importMap := jsImportMap(pf.relPath, pf.root, pf.src, repoIndex, moduleSet)
-		j.processFile(pf.relPath, pf.src, pf.root, moduleDefs, importMap, repoIndex, moduleSet, &res)
+		j.processFile(pf.relPath, pf.src, pf.root, pf.defs, importMap, repoIndex, moduleSet, &res)
 	}
 
 	return res, nil
+}
+
+// jsWalkRepo returns all repo-relative JS file paths under root.
+func jsWalkRepo(root string) []string {
+	var out []string
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != root && shouldSkipWalkDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if strings.HasSuffix(name, ".js") || strings.HasSuffix(name, ".mjs") || strings.HasSuffix(name, ".cjs") {
+			rel, relErr := filepath.Rel(root, path)
+			if relErr == nil {
+				out = append(out, rel)
+			}
+		}
+		return nil
+	})
+	return out
 }
 
 // moduleID returns the js:module entity ID for a repo-relative path.
@@ -239,12 +281,8 @@ func jsCollectImportedNames(clauseNode *sitter.Node, targetPath string, src []by
 		case "identifier":
 			// import defaultExport from '...'
 			name := child.Content(src)
-			candidateID := funcID(targetPath, name)
-			for _, id := range repoIndex[name] {
-				if id == candidateID {
-					imports[name] = candidateID
-					break
-				}
+			if id, ok := jsMatchImport(targetPath, name, repoIndex); ok {
+				imports[name] = id
 			}
 		case "namespace_import":
 			// import * as ns from '...' - skip
@@ -272,14 +310,23 @@ func jsCollectNamedImports(namedImports *sitter.Node, targetPath string, src []b
 			continue
 		}
 		name := nameNode.Content(src)
-		candidateID := funcID(targetPath, name)
-		for _, id := range repoIndex[name] {
-			if id == candidateID {
-				imports[name] = candidateID
-				break
-			}
+		if id, ok := jsMatchImport(targetPath, name, repoIndex); ok {
+			imports[name] = id
 		}
 	}
+}
+
+// jsMatchImport looks up name in repoIndex and returns the entity ID from targetPath
+// that matches, accepting both js:func: and js:class: kinds.
+func jsMatchImport(targetPath, name string, repoIndex map[string][]string) (string, bool) {
+	funcCandidate := funcID(targetPath, name)
+	classCandidate := classID(targetPath, name)
+	for _, id := range repoIndex[name] {
+		if id == funcCandidate || id == classCandidate {
+			return id, true
+		}
+	}
+	return "", false
 }
 
 // jsStringValue extracts the string value from a tree-sitter string node,
@@ -418,12 +465,16 @@ func (j jsAnalyzer) processFile(
 			rawSource := jsStringValue(srcNode, src)
 			resolved := resolveModulePath(fileDir, rawSource)
 			if strings.HasPrefix(rawSource, ".") {
-				res.Edges = append(res.Edges, contract.Edge{
-					From:     modID,
-					To:       moduleID(resolved),
-					Relation: contract.RelImports,
-					SrcFile:  relPath,
-				})
+				targetID := moduleID(resolved)
+				if !emittedImports[targetID] {
+					emittedImports[targetID] = true
+					res.Edges = append(res.Edges, contract.Edge{
+						From:     modID,
+						To:       targetID,
+						Relation: contract.RelImports,
+						SrcFile:  relPath,
+					})
+				}
 			} else if !seenExternal[rawSource] {
 				// Bare specifier not in-repo -> requires SymbolRow.
 				seenExternal[rawSource] = true
@@ -755,16 +806,21 @@ func (j jsAnalyzer) emitFunc(
 	}
 }
 
-// jsWalkCalls walks the node tree and calls fn for every call_expression node
-// along with its function/callee child.
+// jsWalkCalls walks the node tree and calls fn for every call_expression or new_expression node
+// along with its function/constructor/callee child.
 func jsWalkCalls(node *sitter.Node, src []byte, fn func(callNode *sitter.Node, callee *sitter.Node)) {
 	if node == nil {
 		return
 	}
-	if node.Type() == "call_expression" {
-		fnChild := node.ChildByFieldName("function")
-		if fnChild != nil {
+	switch node.Type() {
+	case "call_expression":
+		if fnChild := node.ChildByFieldName("function"); fnChild != nil {
 			fn(node, fnChild)
+		}
+	case "new_expression":
+		// new Cls() - constructor field holds the class being instantiated.
+		if ctorChild := node.ChildByFieldName("constructor"); ctorChild != nil {
+			fn(node, ctorChild)
 		}
 	}
 	count := int(node.ChildCount())

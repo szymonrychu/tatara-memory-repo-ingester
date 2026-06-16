@@ -73,7 +73,13 @@ type GraphPush struct {
 	FileSHAs   map[string]string `json:"file_shas,omitempty"`
 }
 
-// Extractor origin tags written onto every row of a GraphPush.
+// Extractor origin tags written onto every row of a GraphPush. The server
+// stores the extractor as a free string and scopes reconcile deletes by it, so
+// all three values are treated as distinct, recognised origins. ExtractorAST and
+// ExtractorSemantic are also declared in tatara-memory codegraph/types.go;
+// ExtractorSCIP is ingester-only (SCIP index source) and is accepted by the
+// server under the same free-string contract. If the server ever validates
+// against an allowlist, add ExtractorSCIP there too.
 const (
 	ExtractorAST      = "ast"
 	ExtractorSemantic = "semantic"

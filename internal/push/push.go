@@ -187,6 +187,9 @@ func (c *Client) do(ctx context.Context, method, path string, in any, want int, 
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != want {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		// Drain the remainder so the connection can be returned to the keep-alive
+		// pool - critical on the retry path where 5xx/429 responses are common.
+		_, _ = io.Copy(io.Discard, resp.Body)
 		err := fmt.Errorf("%s: status %d: %s", path, resp.StatusCode, string(b))
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 			return &transientError{cause: err}

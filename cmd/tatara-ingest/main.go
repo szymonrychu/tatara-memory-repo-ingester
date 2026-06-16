@@ -5,8 +5,10 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +42,9 @@ func realMain() error {
 	o.crossRepoPrefix = cfg.CrossRepoPrefix
 	o.metricsPushURL = cfg.MetricsPushURL
 
+	if err := validateOIDCConfig(cfg.OIDCClientID, cfg.OIDCIssuer, cfg.OIDCClientSecret); err != nil {
+		return err
+	}
 	ctx := context.Background()
 	hc := http.DefaultClient
 	if cfg.OIDCClientID != "" {
@@ -97,4 +102,23 @@ func orDur(d time.Duration) time.Duration {
 // envLookup maps a kebab-case config key to its UPPER_SNAKE env var.
 func envLookup(key string) string {
 	return os.Getenv(strings.ToUpper(strings.ReplaceAll(key, "-", "_")))
+}
+
+// validateOIDCConfig returns an error when oidc-client-id is set but the
+// companion fields are missing or malformed, catching misconfigurations before
+// any HTTP call is made rather than surfacing them as opaque oauth2 errors.
+func validateOIDCConfig(clientID, issuer, clientSecret string) error {
+	if clientID == "" {
+		return nil
+	}
+	if issuer == "" {
+		return fmt.Errorf("oidc-issuer is required when oidc-client-id is set")
+	}
+	if _, err := url.ParseRequestURI(issuer); err != nil {
+		return fmt.Errorf("oidc-issuer %q is not a valid URL: %w", issuer, err)
+	}
+	if clientSecret == "" {
+		return fmt.Errorf("oidc-client-secret is required when oidc-client-id is set")
+	}
+	return nil
 }

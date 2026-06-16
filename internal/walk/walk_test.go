@@ -203,6 +203,70 @@ func TestParseDiffTypeChangeHandledAsModify(t *testing.T) {
 	require.Equal(t, 'A', m["a.go"].Status)
 }
 
+// TestFullSetWithNonASCIIPath verifies that ls-files with a non-ASCII filename
+// produces a correct, unquoted path and a valid ContentSHA.
+// Without the -z flag git emits octal-escaped paths like "w\303\251ird.go"
+// which break contentSHA (os.Lstat fails on the quoted string).
+func TestFullSetWithNonASCIIPath(t *testing.T) {
+	dir := gitRepo(t)
+	content := "package wéird"
+	write(t, dir, "wéird.go", content)
+	commit(t, dir, "init")
+
+	got, err := walk.Diff(dir, "", false)
+	require.NoError(t, err)
+	require.True(t, got.FullSet)
+	m := byPath(got)
+
+	ch, ok := m["wéird.go"]
+	require.True(t, ok, "non-ASCII filename must appear with its real path, not quoted")
+	require.Equal(t, sha(content), ch.ContentSHA, "ContentSHA must be non-empty and correct for non-ASCII path")
+}
+
+// TestDiffWithNonASCIIPath verifies that git diff --name-status for a non-ASCII
+// filename produces a correct, unquoted path and a valid ContentSHA.
+func TestDiffWithNonASCIIPath(t *testing.T) {
+	dir := gitRepo(t)
+	write(t, dir, "normal.go", "package a")
+	base := commit(t, dir, "init")
+
+	content := "package wéird"
+	write(t, dir, "wéird.go", content)
+	commit(t, dir, "add non-ASCII")
+
+	got, err := walk.Diff(dir, base, false)
+	require.NoError(t, err)
+	require.False(t, got.FullSet)
+	m := byPath(got)
+
+	ch, ok := m["wéird.go"]
+	require.True(t, ok, "non-ASCII filename must appear with its real path in diff mode")
+	require.Equal(t, sha(content), ch.ContentSHA, "ContentSHA must be correct for non-ASCII path in diff mode")
+}
+
+// TestDiffWithNonASCIIRename verifies that a rename involving a non-ASCII
+// destination produces correct Path, OldPath, and ContentSHA.
+func TestDiffWithNonASCIIRename(t *testing.T) {
+	dir := gitRepo(t)
+	content := "package x\n\nfunc Stable() {}\n"
+	write(t, dir, "old.go", content)
+	base := commit(t, dir, "init")
+
+	require.NoError(t, os.Rename(
+		filepath.Join(dir, "old.go"), filepath.Join(dir, "wéird.go")))
+	commit(t, dir, "rename to non-ASCII")
+
+	got, err := walk.Diff(dir, base, false)
+	require.NoError(t, err)
+	require.False(t, got.FullSet)
+	require.Len(t, got.Files, 1)
+	ch := got.Files[0]
+	require.Equal(t, 'R', ch.Status)
+	require.Equal(t, "wéird.go", ch.Path, "rename destination must be unquoted")
+	require.Equal(t, "old.go", ch.OldPath)
+	require.Equal(t, sha(content), ch.ContentSHA)
+}
+
 // TestParseDiffShortLineWarns verifies parseDiff does not panic or silently
 // ignore a malformed line that has no tab-separated fields beyond the code.
 // We test via a full diff cycle with a since SHA so parseDiff is invoked;

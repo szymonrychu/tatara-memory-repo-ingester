@@ -49,3 +49,15 @@ Selector labels
 app.kubernetes.io/name: {{ include "tatara-memory-repo-ingester.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
+
+{{/*
+Environment config keys (camelCase values.yaml -> SCREAMING_SNAKE ConfigMap data).
+*/}}
+{{- define "tatara-memory-repo-ingester.envConfig" -}}
+BASE_URL: {{ .Values.baseUrl | quote }}
+OIDC_ISSUER: {{ .Values.oidcIssuer | quote }}
+OIDC_CLIENT_ID: {{ .Values.oidcClientId | quote }}
+OIDC_AUDIENCE: {{ .Values.oidcAudience | quote }}
+REPO_NAME: {{ .Values.repoName | quote }}
+REPO_ROOT: {{ .Values.repoRoot | quote }}
+{{- end }}

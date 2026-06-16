@@ -103,15 +103,10 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 						"scip_kind": "unspecified",
 					},
 				})
-				// Emit provides SymbolRow for cross-repo resolution.
-				symbols = append(symbols, contract.SymbolRow{
-					Symbol:   d.Symbol,
-					Lang:     lang,
-					Kind:     "scip_symbol",
-					Role:     contract.RoleProvides,
-					EntityID: entityID(lang, d.Symbol),
-					SrcFile:  doc.RelativePath,
-				})
+				// SymbolRows (provides/requires) for cross-repo resolution are deferred to
+				// ROADMAP: raw SCIP moniker strings do not match AST canonical symbols and
+				// the reconcile delete is not extractor-scoped, so emitting them would
+				// clobber AST rows. See MEMORY.md 2026-06-06 + findings 1, 2, 6.
 				continue
 			}
 			kind := si.Kind
@@ -126,30 +121,12 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 					"scip_kind": kind.String(),
 				},
 			})
-			// Emit provides SymbolRow for cross-repo resolution.
-			symbols = append(symbols, contract.SymbolRow{
-				Symbol:   si.Symbol,
-				Lang:     lang,
-				Kind:     scipKind(kind),
-				Role:     contract.RoleProvides,
-				EntityID: entityID(lang, si.Symbol),
-				SrcFile:  doc.RelativePath,
-			})
-		}
-
-		// Track which symbols have a local definition so we can emit requires rows
-		// for references that resolve only via ExternalSymbols.
-		localDefSet := make(map[string]struct{}, len(defs))
-		for _, d := range defs {
-			localDefSet[d.Symbol] = struct{}{}
 		}
 
 		// Emit edges: each reference occurrence -> find enclosing def -> emit edge.
 		// Deduplicate by (from, to, relation) to avoid redundant pushes.
 		type edgeKey struct{ from, to, rel string }
 		seenEdges := make(map[edgeKey]struct{})
-		// Deduplicate requires SymbolRows too.
-		seenRequires := make(map[string]struct{})
 
 		for _, ref := range refs {
 			if ref.Symbol == "" {
@@ -173,7 +150,9 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 			}
 			seenEdges[ek] = struct{}{}
 
-			const confScore = 0.98
+			// SCIP type resolution is compiler-grade: use score=1.0 so edges rank
+			// as EXTRACTED, matching the certainty of AST-extracted facts.
+			const confScore = 1.0
 			edges = append(edges, contract.Edge{
 				From:            ek.from,
 				To:              ek.to,
@@ -186,26 +165,6 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 					"confidence": contract.ConfidenceFor(contract.ResTypeResolved),
 				},
 			})
-
-			// Emit requires SymbolRow when the referenced symbol has no local def
-			// (i.e. it comes from ExternalSymbols or is absent).
-			if _, isLocal := localDefSet[ref.Symbol]; !isLocal {
-				if _, alreadySeen := seenRequires[ref.Symbol]; !alreadySeen {
-					seenRequires[ref.Symbol] = struct{}{}
-					reqKind := "scip_symbol"
-					if si, ok2 := symInfo[ref.Symbol]; ok2 {
-						reqKind = scipKind(si.Kind)
-					}
-					symbols = append(symbols, contract.SymbolRow{
-						Symbol:   ref.Symbol,
-						Lang:     lang,
-						Kind:     reqKind,
-						Role:     contract.RoleRequires,
-						EntityID: entityID(lang, ref.Symbol),
-						SrcFile:  doc.RelativePath,
-					})
-				}
-			}
 		}
 	}
 
@@ -322,7 +281,16 @@ func bestRange(occ *scipbindings.Occurrence) []int32 {
 // skipped; a reference to the same symbol at a different range (recursion) is
 // allowed to produce a self-edge.
 func enclosingDef(defs []*scipbindings.Occurrence, ref *scipbindings.Occurrence) (*scipbindings.Occurrence, bool) {
-	refLine, _ := occStartLine(ref.Range)
+	// Finding 4: bail out on malformed ref range instead of using refLine=0.
+	refLine, ok := occStartLine(ref.Range)
+	if !ok {
+		return nil, false
+	}
+
+	// Finding 3: return the innermost (smallest-span) containing def, not the first.
+	var best *scipbindings.Occurrence
+	var bestSpan int32 = -1
+
 	for _, d := range defs {
 		// Skip only the def's own name-token occurrence (same symbol + same range),
 		// not legitimate recursive self-references.
@@ -336,8 +304,15 @@ func enclosingDef(defs []*scipbindings.Occurrence, ref *scipbindings.Occurrence)
 			continue
 		}
 		if refLine >= startLine && refLine < endLine {
-			return d, true
+			span := endLine - startLine
+			if best == nil || span < bestSpan {
+				best = d
+				bestSpan = span
+			}
 		}
+	}
+	if best != nil {
+		return best, true
 	}
 	return nil, false
 }

@@ -248,6 +248,31 @@ func TestTierForScore(t *testing.T) {
 	}
 }
 
+// TestExtractorConstants guards the string values of all three recognised
+// extractor origin tags against silent renaming. If ExtractorSCIP drifts from
+// "scip" the server will silently create a fourth, orphaned extractor bucket.
+func TestExtractorConstants(t *testing.T) {
+	require.Equal(t, "ast", contract.ExtractorAST)
+	require.Equal(t, "semantic", contract.ExtractorSemantic)
+	require.Equal(t, "scip", contract.ExtractorSCIP)
+}
+
+func TestGraphPushSCIPExtractorShape(t *testing.T) {
+	p := contract.GraphPush{
+		Repo:      "tatara-cli",
+		Commit:    "abc123",
+		Extractor: contract.ExtractorSCIP,
+		Files:     []string{"cmd/root.go"},
+		Entities:  []contract.Entity{},
+		Edges:     []contract.Edge{},
+	}
+	b, err := json.Marshal(p)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	require.Equal(t, "scip", got["extractor"], "ExtractorSCIP must serialise as 'scip'")
+}
+
 func TestGraphPushExtractorAndFileSHAsShape(t *testing.T) {
 	p := contract.GraphPush{
 		Repo:      "tatara-cli",

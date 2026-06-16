@@ -9,6 +9,31 @@ import (
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/contract"
 )
 
+// skipWalkDirs are directory names that must never be descended into when a
+// language analyzer walks the whole repo to build its resolution index. They
+// hold dependencies, VCS metadata, or build output - parsing them is wasteful
+// and pollutes the name->entityID index with symbols that are never emitted as
+// entities (entities are only emitted for diff-set files), which would resolve
+// imports to phantom targets. filepath.WalkDir does not honour .gitignore, so
+// this prune list is the only thing keeping node_modules/vendor/.git out.
+var skipWalkDirs = map[string]bool{
+	".git":          true,
+	"node_modules":  true,
+	"vendor":        true,
+	".venv":         true,
+	"venv":          true,
+	"__pycache__":   true,
+	".tox":          true,
+	".mypy_cache":   true,
+	".pytest_cache": true,
+}
+
+// shouldSkipWalkDir reports whether a directory named dirName should be pruned
+// from a repo-wide analyzer walk (it appears in skipWalkDirs).
+func shouldSkipWalkDir(dirName string) bool {
+	return skipWalkDirs[dirName]
+}
+
 // Result is what an Analyzer emits for its assigned file set.
 type Result struct {
 	Entities   []contract.Entity

@@ -11,6 +11,40 @@ import (
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/contract"
 )
 
+// TestTerraformEdgeDedup verifies that duplicate edges (same relation+from+to) produced by
+// multiple attributes referencing the same symbol are collapsed to a single edge (finding 1).
+func TestTerraformEdgeDedup(t *testing.T) {
+	a := analyze.NewTerraform()
+	res, err := a.Analyze(context.Background(), "testdata/tf", []string{"dedup_nested.tf"})
+	require.NoError(t, err)
+
+	// Count var_ref edges from aws_s3_bucket.main -> tf:variable:bucket_name.
+	// var.bucket_name appears twice (bucket + tags.Name) but must produce exactly one edge.
+	count := 0
+	for _, e := range res.Edges {
+		if e.Relation == contract.RelVarRef &&
+			e.From == "tf:resource:aws_s3_bucket.main" &&
+			e.To == "tf:variable:bucket_name" {
+			count++
+		}
+	}
+	require.Equal(t, 1, count, "duplicate var_ref edges must be collapsed to 1")
+}
+
+// TestTerraformNestedBlockEdges verifies that references inside nested blocks (e.g. provisioner)
+// produce edges (finding 2).
+func TestTerraformNestedBlockEdges(t *testing.T) {
+	a := analyze.NewTerraform()
+	res, err := a.Analyze(context.Background(), "testdata/tf", []string{"dedup_nested.tf"})
+	require.NoError(t, err)
+
+	// var.bucket_name used only inside provisioner "local-exec" nested block.
+	_, ok := findEdge(res.Edges, contract.RelVarRef,
+		"tf:resource:null_resource.provisioner_consumer",
+		"tf:variable:bucket_name")
+	require.True(t, ok, "var_ref from provisioner nested block must produce an edge")
+}
+
 func TestTerraformAnalyzer(t *testing.T) {
 	a := analyze.NewTerraform()
 	require.True(t, a.Match("main.tf"))

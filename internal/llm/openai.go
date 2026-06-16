@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,6 +18,10 @@ import (
 // retryDelay is the default backoff between attempts when no Retry-After is
 // present; overridable in tests.
 var retryDelay = 500 * time.Millisecond
+
+// jitterFrac controls the maximum random jitter added to the fixed backoff as
+// a fraction of retryDelay (0 disables jitter; overridable in tests).
+var jitterFrac int64 = 2 // jitter up to retryDelay/2
 
 // maxRetryDelay caps the Retry-After value so one bad gateway cannot stall the
 // pipeline indefinitely.
@@ -143,6 +148,10 @@ func (c *Client) Complete(ctx context.Context, prompt string) (string, error) {
 				wait = maxRetryDelay
 			}
 			nextDelay = wait
+		} else if jitterFrac > 0 {
+			// No Retry-After: spread concurrent retries with random jitter so
+			// all goroutines in the errgroup do not re-fire simultaneously.
+			nextDelay = retryDelay + time.Duration(rand.Int64N(int64(retryDelay)/jitterFrac)) //nolint:gosec
 		}
 	}
 	return "", lastErr

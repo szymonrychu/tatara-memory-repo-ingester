@@ -374,6 +374,78 @@ func TestHelmAnalyzer_DeterministicOutput(t *testing.T) {
 	}
 }
 
+// TestHelmAnalyzer_MatchValuesYAMLRequiresChartYAMLSibling verifies finding 1 (round 2):
+// Match("config/values.yaml") must return false when no Chart.yaml sibling exists on disk,
+// and true when a Chart.yaml sibling is present. Each case uses a fresh analyzer instance
+// (no shared cache state) to test independently.
+func TestHelmAnalyzer_MatchValuesYAMLRequiresChartYAMLSibling(t *testing.T) {
+	t.Run("no_sibling_returns_false", func(t *testing.T) {
+		td := t.TempDir()
+		// config/values.yaml with NO Chart.yaml sibling.
+		require.NoError(t, mkdirFile(td, "config/values.yaml", "key: val\n"))
+		a := analyze.NewHelm(td)
+		require.False(t, a.Match("config/values.yaml"),
+			"Match must not claim config/values.yaml when no Chart.yaml sibling exists")
+	})
+
+	t.Run("with_sibling_returns_true", func(t *testing.T) {
+		td := t.TempDir()
+		// config/values.yaml WITH a Chart.yaml sibling.
+		require.NoError(t, mkdirFile(td, "config/values.yaml", "key: val\n"))
+		require.NoError(t, mkdirFile(td, "config/Chart.yaml", "apiVersion: v2\nname: cfg\nversion: 0.1.0\n"))
+		a := analyze.NewHelm(td)
+		require.True(t, a.Match("config/values.yaml"),
+			"Match must claim config/values.yaml when Chart.yaml sibling exists on disk")
+	})
+}
+
+// TestHelmAnalyzer_MatchValuesYAMLRootRequiresChartYAML verifies that a root-level values.yaml
+// also requires a Chart.yaml in the same dir when repoRoot is set.
+func TestHelmAnalyzer_MatchValuesYAMLRootRequiresChartYAML(t *testing.T) {
+	t.Run("no_chart_yaml_returns_false", func(t *testing.T) {
+		td := t.TempDir()
+		require.NoError(t, writeFile(td, "values.yaml", "key: val\n"))
+		a := analyze.NewHelm(td)
+		require.False(t, a.Match("values.yaml"),
+			"Match must not claim root values.yaml when no Chart.yaml sibling exists")
+	})
+
+	t.Run("with_chart_yaml_returns_true", func(t *testing.T) {
+		td := t.TempDir()
+		require.NoError(t, writeFile(td, "values.yaml", "key: val\n"))
+		require.NoError(t, writeFile(td, "Chart.yaml", "apiVersion: v2\nname: rooty\nversion: 0.1.0\n"))
+		a := analyze.NewHelm(td)
+		require.True(t, a.Match("values.yaml"),
+			"Match must claim root values.yaml when Chart.yaml sibling exists")
+	})
+}
+
+// TestHelmAnalyzer_MatchStatMemoization verifies finding 2 (round 2):
+// repeated Match calls for templates/ files in the same chart root must not re-stat
+// the same Chart.yaml. We test correctness of the memoization path (cache hit returns
+// same result). Stat-count verification is implicit: if the implementation is correct,
+// removing the chart root's Chart.yaml AFTER the first match call must not change the
+// result for a second call (the cached true is returned without re-stat).
+func TestHelmAnalyzer_MatchStatMemoization(t *testing.T) {
+	td := t.TempDir()
+	require.NoError(t, writeFile(td, "Chart.yaml", "apiVersion: v2\nname: cachechart\nversion: 0.1.0\n"))
+	require.NoError(t, mkdirFile(td, "templates/a.yaml", "a: 1\n"))
+	require.NoError(t, mkdirFile(td, "templates/b.yaml", "b: 2\n"))
+
+	a := analyze.NewHelm(td)
+
+	// Both files match (Chart.yaml present).
+	require.True(t, a.Match("templates/a.yaml"))
+	require.True(t, a.Match("templates/b.yaml"))
+
+	// Remove Chart.yaml to prove the second call used the cache.
+	require.NoError(t, os.Remove(filepath.Join(td, "Chart.yaml")))
+
+	// The memoized result must still be true (cache hit, no re-stat).
+	require.True(t, a.Match("templates/b.yaml"),
+		"Match must return cached result (true) for same chart root after Chart.yaml removed")
+}
+
 // writeFile writes content to path relative to dir.
 func writeFile(dir, name, content string) error {
 	return os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600)

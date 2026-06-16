@@ -1,6 +1,7 @@
 package semantic
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -49,7 +50,8 @@ const maxHyperedgesPerChunk = 3
 // and tier. Hyperedges are capped at 3 with deterministic ids.
 func ParseFragment(repo string, body []byte) (analyze.Result, error) {
 	var f rawFragment
-	if err := json.Unmarshal(stripFences(body), &f); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(stripFences(body)))
+	if err := dec.Decode(&f); err != nil {
 		return analyze.Result{}, fmt.Errorf("parse extraction fragment: %w", err)
 	}
 	// remap: model-emitted id -> canonical conceptID for concept/rationale nodes.
@@ -138,8 +140,16 @@ func entityTypeFor(fileType string) string {
 
 // conceptID is the deterministic id for a concept/rationale node: a slug of the
 // label scoped to the repo. Re-extraction of the same label upserts, not dupes.
+// When the label has no alphanumeric runes, a stable sha256 hash of the raw label
+// is used so distinct punctuation-only labels get distinct ids (mirroring hyperedgeID).
 func conceptID(repo, label string) string {
-	return "concept:" + repo + ":" + slugLabel(label)
+	slug := slugLabel(label)
+	if slug == "" {
+		h := sha256.New()
+		h.Write([]byte(label))
+		return fmt.Sprintf("concept:%s:%x", repo, h.Sum(nil)[:8])
+	}
+	return "concept:" + repo + ":" + slug
 }
 
 // slugLabel lowercases a label and collapses runs of non-[a-z0-9] into single
@@ -180,14 +190,13 @@ func hyperedgeID(repo, sourceFile, modelID, label string, members []string) stri
 	return fmt.Sprintf("he:%s:%s:%s", repo, sf, mid)
 }
 
-// stripFences extracts the JSON object from the first '{' to the last '}', which
-// handles all model fence variants (```json, ```JSON, ``` json, trailing prose).
+// stripFences finds the first '{' in body and returns the suffix starting there.
+// A json.Decoder on this suffix stops at the end of the first valid JSON value,
+// so trailing prose (including prose containing '}') is ignored.
 func stripFences(body []byte) []byte {
-	s := string(body)
-	start := strings.Index(s, "{")
-	end := strings.LastIndex(s, "}")
-	if start == -1 || end == -1 || end < start {
+	idx := bytes.IndexByte(body, '{')
+	if idx == -1 {
 		return body
 	}
-	return []byte(s[start : end+1])
+	return body[idx:]
 }
