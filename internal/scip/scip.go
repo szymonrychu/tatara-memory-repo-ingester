@@ -83,17 +83,26 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 			}
 		}
 
-		// Emit one entity per definition.
-		defBySymbol := make(map[string]*scipbindings.Occurrence, len(defs))
+		// seenEntityIDs deduplicates entity rows within this document; a symbol
+		// may appear as a Definition occurrence more than once (e.g. forward
+		// declaration + definition, or an indexer that re-emits the same def).
+		seenEntityIDs := make(map[string]struct{}, len(defs))
+
+		// Emit one entity per definition, deduplicating by entity ID.
 		for _, d := range defs {
-			defBySymbol[d.Symbol] = d
+			eid := entityID(lang, d.Symbol)
+			if _, seen := seenEntityIDs[eid]; seen {
+				continue
+			}
+			seenEntityIDs[eid] = struct{}{}
+
 			// Prefer EnclosingRange for full body span; fall back to Range.
 			lineStart, lineEnd := occLineStartEnd(bestRange(d))
 			si, ok := symInfo[d.Symbol]
 			if !ok {
 				// No SymbolInformation: emit a minimal entity.
 				entities = append(entities, contract.Entity{
-					ID:        entityID(lang, d.Symbol),
+					ID:        eid,
 					Name:      lastComponent(d.Symbol),
 					Type:      "scip_symbol",
 					FilePath:  doc.RelativePath,
@@ -111,7 +120,7 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 			}
 			kind := si.Kind
 			entities = append(entities, contract.Entity{
-				ID:        entityID(lang, si.Symbol),
+				ID:        eid,
 				Name:      displayName(si),
 				Type:      scipKind(kind),
 				FilePath:  doc.RelativePath,
@@ -149,6 +158,25 @@ func Parse(path, repo string) (contract.GraphPush, error) {
 				continue
 			}
 			seenEdges[ek] = struct{}{}
+
+			// If the To entity has no local (or already-emitted placeholder) entity,
+			// emit a minimal placeholder so the edge target resolves and the graph
+			// has no dangling edges.
+			if _, exists := seenEntityIDs[ek.to]; !exists {
+				seenEntityIDs[ek.to] = struct{}{}
+				name := lastComponent(ref.Symbol)
+				if extSI, extOK := symInfo[ref.Symbol]; extOK && extSI.DisplayName != "" {
+					name = extSI.DisplayName
+				}
+				entities = append(entities, contract.Entity{
+					ID:   ek.to,
+					Name: name,
+					Type: "scip_external",
+					Properties: map[string]string{
+						"scip_kind": "external",
+					},
+				})
+			}
 
 			// SCIP type resolution is compiler-grade: use score=1.0 so edges rank
 			// as EXTRACTED, matching the certainty of AST-extracted facts.
