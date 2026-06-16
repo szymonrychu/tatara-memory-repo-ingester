@@ -68,8 +68,9 @@ func fallbackAnalyzeGoPackage(
 		collectFuncDefs(pf.pkgPath, pf.root, pf.src, pkgDefs)
 	}
 
+	seenPkg := map[string]bool{}
 	for _, pf := range parsed {
-		emitFallbackFile(log, pf.relPath, pf.pkgPath, pf.src, pf.root, pkgDefs, &res)
+		emitFallbackFile(log, pf.relPath, pf.pkgPath, pf.src, pf.root, pkgDefs, seenPkg, &res)
 	}
 
 	return res
@@ -145,23 +146,27 @@ func fallbackReceiverName(recvNode *sitter.Node, src []byte) string {
 }
 
 // emitFallbackFile emits entities, edges, and chunks for one file parsed by the fallback.
+// seenPkg tracks which go:package entity IDs have already been emitted; the package entity
+// is emitted at most once per unique pkgPath, matching processPackage.emitPkgEntityOnce.
 func emitFallbackFile(
 	log *slog.Logger,
 	relPath, pkgPath string,
 	src []byte,
 	root *sitter.Node,
 	pkgDefs map[string]string,
+	seenPkg map[string]bool,
 	res *Result,
 ) {
 	pkgID := "go:package:" + pkgPath
 
-	// Emit package entity (may be a duplicate if multiple files share a package,
-	// but the contract allows duplicate entity IDs - upsert on server side).
-	res.Entities = append(res.Entities, contract.Entity{
-		ID:   pkgID,
-		Name: fallbackPackageName(root, src),
-		Type: contract.EntityGoPackage,
-	})
+	if !seenPkg[pkgID] {
+		seenPkg[pkgID] = true
+		res.Entities = append(res.Entities, contract.Entity{
+			ID:   pkgID,
+			Name: fallbackPackageName(root, src),
+			Type: contract.EntityGoPackage,
+		})
+	}
 
 	count := int(root.NamedChildCount())
 	for i := 0; i < count; i++ {
