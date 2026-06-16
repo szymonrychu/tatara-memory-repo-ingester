@@ -466,6 +466,39 @@ func TestNon2xxBodyFullyDrained(t *testing.T) {
 		"non-2xx response body must be fully drained so the connection is returned to the keep-alive pool (got %d unique remote addrs)", uniqueConns)
 }
 
+// TestPushChunksTimeoutErrorContainsJobState verifies that when PushChunks
+// times out waiting for a job, the error message includes the last observed
+// job Status, Done, Total, and Failed fields so the failure is self-describing
+// (finding 2: timeout error must include progress fields).
+func TestPushChunksTimeoutErrorContainsJobState(t *testing.T) {
+	// Server always returns a stuck running job with partial progress so we can
+	// assert those fields appear in the timeout error.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/memories:bulk":
+			w.WriteHeader(202)
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "stuck1", Status: "running", Total: 10, Done: 3, Failed: 1})
+		default:
+			// Always return the same partial progress; job never completes.
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "stuck1", Status: "running", Total: 10, Done: 3, Failed: 1})
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	c := push.New(srv.URL, http.DefaultClient, 5*time.Millisecond)
+	err := c.PushChunks(ctx, "r", nil, []contract.IngestItem{{IdempotencyKey: "k", Text: "t"}})
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "stuck1", "error must include job ID")
+	assert.Contains(t, msg, "running", "error must include last observed status")
+	assert.Contains(t, msg, "3", "error must include done count")
+	assert.Contains(t, msg, "10", "error must include total count")
+	assert.Contains(t, msg, "failed=1", "error must include failed count")
+}
+
 // TestDoBodyDrainedAfterDecode verifies that the response body is drained
 // after decode so HTTP keep-alive connection reuse is possible (finding 6).
 // We verify this indirectly: if the body is not drained, the second request

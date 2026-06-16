@@ -46,6 +46,7 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 	m := obs.New()
 	m.IngestRunsTotal.Inc()
 	start := time.Now()
+	slog.Info("ingest start", "repo", o.repoName, "since", o.since, "full", o.full, "scip", o.scipPath != "")
 
 	// Short-lived Jobs cannot be scraped; push gathered metrics at job end.
 	// Best-effort: a push failure is logged and never fails the ingest. Deferred

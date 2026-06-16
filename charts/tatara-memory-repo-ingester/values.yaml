@@ -15,6 +15,7 @@ oidcClientId: ""
 oidcAudience: ""
 repoName: ""
 repoRoot: ""
+metricsPushUrl: ""
 
 resources:
   requests:
