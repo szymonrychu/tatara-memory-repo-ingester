@@ -35,6 +35,7 @@ type options struct {
 	full            bool
 	baseURL         string
 	pollInterval    time.Duration
+	httpTimeout     time.Duration
 	crossRepoPrefix string
 	scipPath        string
 	scipRepo        string
@@ -60,7 +61,10 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 		}
 		m.IngestRunResultTotal.WithLabelValues(result).Inc()
 		if o.metricsPushURL != "" {
-			if err := m.Push(ctx, o.metricsPushURL, hc); err != nil {
+			// Use a plain client so the memory-audience OIDC bearer (hc) is not
+			// sent to the operator's pushmetrics endpoint (different audience).
+			plainHC := &http.Client{Timeout: orDur(o.httpTimeout)}
+			if err := m.Push(ctx, o.metricsPushURL, plainHC); err != nil {
 				slog.Error("metrics push failed", "url", o.metricsPushURL, "error", err) //nolint:gosec // G706: url and err are internal values, not HTTP input
 			}
 		}
@@ -76,14 +80,23 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 
 	// touched is every file in the diff (code-graph Files + memories reconcile_files).
 	// analyzeFiles is only A/M/renamed-new (the files we re-analyze and chunk).
+	// Use a set to deduplicate: renames append both old and new path, and an edge
+	// case could produce duplicates if both appear under separate records.
+	seenTouched := make(map[string]struct{})
 	var touched, analyzeFiles []string
+	addTouched := func(p string) {
+		if _, ok := seenTouched[p]; !ok {
+			seenTouched[p] = struct{}{}
+			touched = append(touched, p)
+		}
+	}
 	for _, ch := range changes.Files {
-		touched = append(touched, ch.Path)
+		addTouched(ch.Path)
 		if ch.Status == 'R' && ch.OldPath != "" {
 			// For renames the old path is never analyzed, but must appear in the
 			// purge sets (touched/Files + reconcile_files) so the server removes
 			// stale entities and chunks for the old location.
-			touched = append(touched, ch.OldPath)
+			addTouched(ch.OldPath)
 		}
 		switch ch.Status {
 		case 'A', 'M', 'R':
@@ -93,6 +106,13 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 
 	reg := analyze.Default(o.crossRepoPrefix, o.repoRoot)
 	groups := reg.Group(analyzeFiles)
+
+	// failedFiles tracks A/M/R files whose analyzer errored. These files must be
+	// excluded from the reconcile set so the server does not purge their existing
+	// chunks when no replacement was produced (transient parse errors cause data
+	// loss otherwise). Deleted files are unaffected: they never go through analyze
+	// and must always be reconciled.
+	failedFiles := make(map[string]struct{})
 
 	var agg analyze.Result
 	for _, a := range reg.Analyzers() {
@@ -106,6 +126,9 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 		if err != nil {
 			slog.Warn("analyzer failed", "analyzer", a.Name(), "error", err)
 			m.AnalyzerParseErrorsTotal.WithLabelValues(a.Name()).Inc()
+			for _, f := range fs {
+				failedFiles[f] = struct{}{}
+			}
 			continue
 		}
 		m.AnalyzerEntitiesTotal.WithLabelValues(a.Name()).Add(float64(len(res.Entities)))
@@ -148,10 +171,17 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 	m.PushRequestsTotal.WithLabelValues("/code-graph:bulk", "ok").Inc()
 	m.IngestStageDuration.WithLabelValues("push_graph").Observe(time.Since(pushStart).Seconds())
 
-	reconcile := touched
-	if changes.FullSet {
-		reconcile = nil // first/full ingest is insert-only (no reconcile)
-	}
+	// Build reconcile list: exclude files whose analyzer failed so existing chunks
+	// are not purged when no replacement was produced. Deleted files (not in
+	// failedFiles since they are never analyzed) are always reconciled.
+	var reconcile []string
+	if !changes.FullSet {
+		for _, f := range touched {
+			if _, failed := failedFiles[f]; !failed {
+				reconcile = append(reconcile, f)
+			}
+		}
+	} // else: first/full ingest is insert-only (reconcile stays nil)
 	chunksStart := time.Now()
 	if err := cl.PushChunks(ctx, o.repoName, reconcile, push.ItemsFromChunks(o.repoName, agg.Chunks)); err != nil {
 		m.PushRequestsTotal.WithLabelValues("/memories:bulk", "err").Inc()
@@ -292,7 +322,7 @@ func runSemantic(ctx context.Context, o options, cl *push.Client, commit string,
 	// tatara OIDC client-credentials bearer on every request. OpenAI is not
 	// OIDC-gated and rejects that JWT with "invalid_issuer", so the LLM call must
 	// carry only its own OpenAI Bearer (set by the llm client).
-	client := llm.New(llm.ConfigFromEnv(getenv), &http.Client{Timeout: 60 * time.Second})
+	client := llm.New(llm.ConfigFromEnv(getenv), &http.Client{Timeout: orDur(o.httpTimeout)})
 	results := make([]analyze.Result, len(chunks))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(4)
