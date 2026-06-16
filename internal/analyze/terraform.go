@@ -110,14 +110,7 @@ func (ta terraformAnalyzer) handleOutput(block *hclsyntax.Block, relPath string)
 		FilePath: relPath,
 	}
 
-	var edges []contract.Edge
-	for attrName, attr := range block.Body.Attributes {
-		if attrName == "depends_on" {
-			edges = append(edges, ta.dependsOnEdges(id, relPath, attr.Expr)...)
-		} else {
-			edges = append(edges, ta.edgesFromExpr(id, relPath, attr.Expr)...)
-		}
-	}
+	edges := ta.edgesFromBody(id, relPath, block.Body, map[string]bool{})
 
 	chunk := contract.Chunk{
 		EntityID: id,
@@ -143,7 +136,7 @@ func (ta terraformAnalyzer) handleResource(block *hclsyntax.Block, relPath strin
 		FilePath: relPath,
 	}
 
-	edges := ta.edgesFromBody(id, relPath, block.Body)
+	edges := ta.edgesFromBody(id, relPath, block.Body, map[string]bool{})
 
 	chunk := contract.Chunk{
 		EntityID: id,
@@ -169,7 +162,7 @@ func (ta terraformAnalyzer) handleData(block *hclsyntax.Block, relPath string) (
 		FilePath: relPath,
 	}
 
-	edges := ta.edgesFromBody(id, relPath, block.Body)
+	edges := ta.edgesFromBody(id, relPath, block.Body, map[string]bool{})
 
 	chunk := contract.Chunk{
 		EntityID: id,
@@ -195,6 +188,7 @@ func (ta terraformAnalyzer) handleModule(block *hclsyntax.Block, relPath string)
 		FilePath: relPath,
 	}
 
+	seen := map[string]bool{}
 	var edges []contract.Edge
 
 	// source attribute: emit module_source edge to the literal source string
@@ -202,7 +196,7 @@ func (ta terraformAnalyzer) handleModule(block *hclsyntax.Block, relPath string)
 		val, diags := srcAttr.Expr.Value(nil)
 		if !diags.HasErrors() && val.Type().Equals(cty.String) {
 			src := val.AsString()
-			edges = append(edges, contract.Edge{
+			edges = appendEdgesDedup(seen, edges, []contract.Edge{{
 				From:     id,
 				To:       src,
 				Relation: contract.RelModuleSource,
@@ -211,7 +205,7 @@ func (ta terraformAnalyzer) handleModule(block *hclsyntax.Block, relPath string)
 					"resolution": contract.ResTypeResolved,
 					"confidence": contract.ConfidenceFor(contract.ResTypeResolved),
 				},
-			})
+			}})
 		}
 	}
 
@@ -220,10 +214,13 @@ func (ta terraformAnalyzer) handleModule(block *hclsyntax.Block, relPath string)
 			continue
 		}
 		if attrName == "depends_on" {
-			edges = append(edges, ta.dependsOnEdges(id, relPath, attr.Expr)...)
+			edges = appendEdgesDedup(seen, edges, ta.dependsOnEdges(id, relPath, attr.Expr))
 		} else {
-			edges = append(edges, ta.edgesFromExpr(id, relPath, attr.Expr)...)
+			edges = appendEdgesDedup(seen, edges, ta.edgesFromExpr(id, relPath, attr.Expr))
 		}
+	}
+	for _, nested := range block.Body.Blocks {
+		edges = append(edges, ta.edgesFromBody(id, relPath, nested.Body, seen)...)
 	}
 
 	chunk := contract.Chunk{
@@ -237,17 +234,34 @@ func (ta terraformAnalyzer) handleModule(block *hclsyntax.Block, relPath string)
 	return []contract.Entity{ent}, edges, []contract.Chunk{chunk}
 }
 
-// edgesFromBody walks all attributes in a block body, routing depends_on specially.
-func (ta terraformAnalyzer) edgesFromBody(srcID, relPath string, body *hclsyntax.Body) []contract.Edge {
+// edgesFromBody walks all attributes and nested blocks in a block body, deduplicating via seen.
+// seen is keyed on relation+from+to; callers must pass a non-nil map.
+func (ta terraformAnalyzer) edgesFromBody(srcID, relPath string, body *hclsyntax.Body, seen map[string]bool) []contract.Edge {
 	var edges []contract.Edge
 	for attrName, attr := range body.Attributes {
 		if attrName == "depends_on" {
-			edges = append(edges, ta.dependsOnEdges(srcID, relPath, attr.Expr)...)
+			edges = appendEdgesDedup(seen, edges, ta.dependsOnEdges(srcID, relPath, attr.Expr))
 		} else {
-			edges = append(edges, ta.edgesFromExpr(srcID, relPath, attr.Expr)...)
+			edges = appendEdgesDedup(seen, edges, ta.edgesFromExpr(srcID, relPath, attr.Expr))
 		}
 	}
+	for _, nested := range body.Blocks {
+		edges = append(edges, ta.edgesFromBody(srcID, relPath, nested.Body, seen)...)
+	}
 	return edges
+}
+
+// appendEdgesDedup appends edges from src to dst, skipping any already in seen.
+func appendEdgesDedup(seen map[string]bool, dst []contract.Edge, src []contract.Edge) []contract.Edge {
+	for _, e := range src {
+		k := e.Relation + "|" + e.From + "|" + e.To
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		dst = append(dst, e)
+	}
+	return dst
 }
 
 // edgesFromExpr collects variable traversals from an expression and maps them to edges.
