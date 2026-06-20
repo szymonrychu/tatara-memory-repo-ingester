@@ -3,7 +3,8 @@
 Shipped: MVP (walker + 5 analyzers + docs + push), M2-B cross-repo
 provides/requires (Go/Python/JS), Go tree-sitter fallback for non-buildable
 packages, M5 SCIP v1 (`--scip` intra-repo graph ingestion), 0.2.6 bulk-repo
-contract fix (repo field in /memories:bulk body).
+contract fix (repo field in /memories:bulk body), Prometheus metrics pushed to
+the operator pushmetrics receiver at job end (`internal/obs`, `METRICS_PUSH_URL`).
 
 Open:
 - M5 SCIP cross-repo: parse import/export monikers into cross_repo_symbols
@@ -13,7 +14,6 @@ Open:
   consider SCIP enclosing_range or document symbol structure).
 - Go fallback packages emit provides but not requires (no type resolution for
   external refs) - revisit if cross-repo coverage of broken packages matters.
-- Prometheus Pushgateway emitter for batch counts.
 - Deploy-time: Keycloak service-account client; Harbor image + infra-helmfile
   tatara-bucket Job release (deploy from main only, rule 10).
 - Drop the kubectl dependency: report the ingested HEAD without `kubectl` in the
