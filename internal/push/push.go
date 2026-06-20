@@ -56,6 +56,14 @@ func (c *Client) PushGraph(ctx context.Context, p contract.GraphPush) (contract.
 	return res, nil
 }
 
+// jobTimeoutErr builds a self-describing timeout error carrying the last
+// observed job state, so a stuck-job failure is diagnosable whether the
+// deadline lands in the poll wait or mid-request on the status read.
+func jobTimeoutErr(job contract.IngestJob, cause error) error {
+	return fmt.Errorf("ingest job %s did not reach terminal within %s: status=%s done=%d/%d failed=%d: %w",
+		job.ID, maxJobWait, job.Status, job.Done, job.Total, job.Failed, cause)
+}
+
 // PushChunks posts a reconcile-aware bulk and polls the resulting job to a
 // terminal state. repo is the repository identifier sent as the JSON "repo"
 // field; the server requires it when reconcileFiles is non-empty. reconcileFiles,
@@ -82,13 +90,19 @@ func (c *Client) PushChunks(ctx context.Context, repo string, reconcileFiles []s
 		polls++
 		select {
 		case <-pollCtx.Done():
-			return fmt.Errorf("ingest job %s did not reach terminal within %s: status=%s done=%d/%d failed=%d: %w",
-				job.ID, maxJobWait, job.Status, job.Done, job.Total, job.Failed, pollCtx.Err())
+			return jobTimeoutErr(job, pollCtx.Err())
 		case <-time.After(c.pollInterval):
 		}
 		// Retry transient poll errors: a momentary 502/503 on the status read
 		// must not abort an in-flight job. 4xx (job gone) is not retried.
 		if err := c.doWithRetry(pollCtx, http.MethodGet, "/ingest-jobs/"+job.ID, nil, http.StatusOK, &job); err != nil {
+			// A deadline that lands mid-request surfaces here as a context error
+			// from the HTTP call rather than via the select above. Report the
+			// same self-describing job state so the timeout is diagnosable
+			// regardless of where the deadline fell.
+			if pollCtx.Err() != nil {
+				return jobTimeoutErr(job, pollCtx.Err())
+			}
 			return err
 		}
 	}
