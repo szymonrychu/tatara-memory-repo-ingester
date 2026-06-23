@@ -59,6 +59,15 @@ func (ta terraformAnalyzer) Analyze(_ context.Context, repoRoot string, files []
 	return res, nil
 }
 
+// moduleDir is the root-module scope for an entity ID: HCL references
+// (var/resource/data/module) resolve within a single root module, i.e. the
+// file's directory. Scoping IDs and edge targets by this dir keeps same-named
+// blocks in different modules distinct (and their idempotency keys unique) while
+// letting intra-module cross-file references still resolve.
+func moduleDir(relPath string) string {
+	return filepath.Dir(relPath)
+}
+
 func (ta terraformAnalyzer) processBlock(block *hclsyntax.Block, relPath string) ([]contract.Entity, []contract.Edge, []contract.Chunk) {
 	switch block.Type {
 	case "variable":
@@ -80,7 +89,7 @@ func (ta terraformAnalyzer) handleVariable(block *hclsyntax.Block, relPath strin
 		return nil, nil, nil
 	}
 	name := block.Labels[0]
-	id := "tf:variable:" + name
+	id := "tf:variable:" + moduleDir(relPath) + ":" + name
 	ent := contract.Entity{
 		ID:       id,
 		Name:     name,
@@ -93,7 +102,7 @@ func (ta terraformAnalyzer) handleVariable(block *hclsyntax.Block, relPath strin
 		FilePath: relPath,
 		Language: "terraform",
 		Header:   fmt.Sprintf("[tf_variable] %s", name),
-		Body:     fmt.Sprintf("variable %q { ... }", name),
+		Body:     fmt.Sprintf("# %s\nvariable %q { ... }", relPath, name),
 	}
 	return []contract.Entity{ent}, nil, []contract.Chunk{chunk}
 }
@@ -103,7 +112,7 @@ func (ta terraformAnalyzer) handleOutput(block *hclsyntax.Block, relPath string)
 		return nil, nil, nil
 	}
 	name := block.Labels[0]
-	id := "tf:output:" + name
+	id := "tf:output:" + moduleDir(relPath) + ":" + name
 	ent := contract.Entity{
 		ID:       id,
 		Name:     name,
@@ -119,7 +128,7 @@ func (ta terraformAnalyzer) handleOutput(block *hclsyntax.Block, relPath string)
 		FilePath: relPath,
 		Language: "terraform",
 		Header:   fmt.Sprintf("[tf_output] %s", name),
-		Body:     fmt.Sprintf("output %q { ... }", name),
+		Body:     fmt.Sprintf("# %s\noutput %q { ... }", relPath, name),
 	}
 	return []contract.Entity{ent}, edges, []contract.Chunk{chunk}
 }
@@ -129,7 +138,7 @@ func (ta terraformAnalyzer) handleResource(block *hclsyntax.Block, relPath strin
 		return nil, nil, nil
 	}
 	resType, resName := block.Labels[0], block.Labels[1]
-	id := fmt.Sprintf("tf:resource:%s.%s", resType, resName)
+	id := fmt.Sprintf("tf:resource:%s:%s.%s", moduleDir(relPath), resType, resName)
 	ent := contract.Entity{
 		ID:       id,
 		Name:     resName,
@@ -145,7 +154,7 @@ func (ta terraformAnalyzer) handleResource(block *hclsyntax.Block, relPath strin
 		FilePath: relPath,
 		Language: "terraform",
 		Header:   fmt.Sprintf("[tf_resource] %s.%s", resType, resName),
-		Body:     fmt.Sprintf("resource %q %q { ... }", resType, resName),
+		Body:     fmt.Sprintf("# %s\nresource %q %q { ... }", relPath, resType, resName),
 	}
 	return []contract.Entity{ent}, edges, []contract.Chunk{chunk}
 }
@@ -155,7 +164,7 @@ func (ta terraformAnalyzer) handleData(block *hclsyntax.Block, relPath string) (
 		return nil, nil, nil
 	}
 	dataType, dataName := block.Labels[0], block.Labels[1]
-	id := fmt.Sprintf("tf:data:%s.%s", dataType, dataName)
+	id := fmt.Sprintf("tf:data:%s:%s.%s", moduleDir(relPath), dataType, dataName)
 	ent := contract.Entity{
 		ID:       id,
 		Name:     dataName,
@@ -171,7 +180,7 @@ func (ta terraformAnalyzer) handleData(block *hclsyntax.Block, relPath string) (
 		FilePath: relPath,
 		Language: "terraform",
 		Header:   fmt.Sprintf("[tf_data] %s.%s", dataType, dataName),
-		Body:     fmt.Sprintf("data %q %q { ... }", dataType, dataName),
+		Body:     fmt.Sprintf("# %s\ndata %q %q { ... }", relPath, dataType, dataName),
 	}
 	return []contract.Entity{ent}, edges, []contract.Chunk{chunk}
 }
@@ -181,7 +190,7 @@ func (ta terraformAnalyzer) handleModule(block *hclsyntax.Block, relPath string)
 		return nil, nil, nil
 	}
 	name := block.Labels[0]
-	id := "tf:module:" + name
+	id := "tf:module:" + moduleDir(relPath) + ":" + name
 	ent := contract.Entity{
 		ID:       id,
 		Name:     name,
@@ -230,7 +239,7 @@ func (ta terraformAnalyzer) handleModule(block *hclsyntax.Block, relPath string)
 		FilePath: relPath,
 		Language: "terraform",
 		Header:   fmt.Sprintf("[tf_module] %s", name),
-		Body:     fmt.Sprintf("module %q { ... }", name),
+		Body:     fmt.Sprintf("# %s\nmodule %q { ... }", relPath, name),
 	}
 	return []contract.Entity{ent}, edges, []contract.Chunk{chunk}
 }
@@ -267,6 +276,7 @@ func appendEdgesDedup(seen map[string]bool, dst []contract.Edge, src []contract.
 
 // edgesFromExpr collects variable traversals from an expression and maps them to edges.
 func (ta terraformAnalyzer) edgesFromExpr(srcID, srcFile string, expr hclsyntax.Expression) []contract.Edge {
+	dir := moduleDir(srcFile)
 	vars := hclsyntax.Variables(expr)
 	var edges []contract.Edge
 	for _, traversal := range vars {
@@ -282,7 +292,7 @@ func (ta terraformAnalyzer) edgesFromExpr(srcID, srcFile string, expr hclsyntax.
 		case "var":
 			edges = append(edges, contract.Edge{
 				From:     srcID,
-				To:       "tf:variable:" + attr.Name,
+				To:       "tf:variable:" + dir + ":" + attr.Name,
 				Relation: contract.RelVarRef,
 				SrcFile:  srcFile,
 				Properties: map[string]string{
@@ -293,7 +303,7 @@ func (ta terraformAnalyzer) edgesFromExpr(srcID, srcFile string, expr hclsyntax.
 		case "module":
 			edges = append(edges, contract.Edge{
 				From:     srcID,
-				To:       "tf:module:" + attr.Name,
+				To:       "tf:module:" + dir + ":" + attr.Name,
 				Relation: contract.RelReferences,
 				SrcFile:  srcFile,
 				Properties: map[string]string{
@@ -308,7 +318,7 @@ func (ta terraformAnalyzer) edgesFromExpr(srcID, srcFile string, expr hclsyntax.
 				if ok2 {
 					edges = append(edges, contract.Edge{
 						From:     srcID,
-						To:       fmt.Sprintf("tf:data:%s.%s", attr.Name, nameAttr.Name),
+						To:       fmt.Sprintf("tf:data:%s:%s.%s", dir, attr.Name, nameAttr.Name),
 						Relation: contract.RelReferences,
 						SrcFile:  srcFile,
 						Properties: map[string]string{
@@ -324,7 +334,7 @@ func (ta terraformAnalyzer) edgesFromExpr(srcID, srcFile string, expr hclsyntax.
 			// resource reference: <type>.<name>.*
 			edges = append(edges, contract.Edge{
 				From:     srcID,
-				To:       fmt.Sprintf("tf:resource:%s.%s", root, attr.Name),
+				To:       fmt.Sprintf("tf:resource:%s:%s.%s", dir, root, attr.Name),
 				Relation: contract.RelReferences,
 				SrcFile:  srcFile,
 				Properties: map[string]string{
@@ -339,6 +349,7 @@ func (ta terraformAnalyzer) edgesFromExpr(srcID, srcFile string, expr hclsyntax.
 
 // dependsOnEdges handles the special depends_on list attribute.
 func (ta terraformAnalyzer) dependsOnEdges(srcID, srcFile string, expr hclsyntax.Expression) []contract.Edge {
+	dir := moduleDir(srcFile)
 	vars := hclsyntax.Variables(expr)
 	var edges []contract.Edge
 	for _, traversal := range vars {
@@ -353,19 +364,19 @@ func (ta terraformAnalyzer) dependsOnEdges(srcID, srcFile string, expr hclsyntax
 		var toID string
 		switch root {
 		case "module":
-			toID = "tf:module:" + attr.Name
+			toID = "tf:module:" + dir + ":" + attr.Name
 		case "data":
 			// data.<type>.<name> -> tf:data:<type>.<name>
 			if len(traversal) >= 3 {
 				nameAttr, ok2 := traversal[2].(hcl.TraverseAttr)
 				if ok2 {
-					toID = fmt.Sprintf("tf:data:%s.%s", attr.Name, nameAttr.Name)
+					toID = fmt.Sprintf("tf:data:%s:%s.%s", dir, attr.Name, nameAttr.Name)
 				}
 			}
 		case "local", "each", "count", "path", "self", "terraform", "var":
 			// built-in or variable references; skip in depends_on context
 		default:
-			toID = fmt.Sprintf("tf:resource:%s.%s", root, attr.Name)
+			toID = fmt.Sprintf("tf:resource:%s:%s.%s", dir, root, attr.Name)
 		}
 		if toID == "" {
 			continue
