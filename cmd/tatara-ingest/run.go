@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -42,6 +41,10 @@ type options struct {
 	scipRepo        string
 	metricsPushURL  string
 	getenv          func(string) string
+	// newRegistry builds the analyzer registry; nil means analyze.Default. A test
+	// seam (like getenv) so a hard-erroring analyzer can be injected to exercise
+	// the quarantine path deterministically.
+	newRegistry func(crossRepoPrefix, repoRoot string) *analyze.Registry
 }
 
 func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
@@ -105,29 +108,36 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 		}
 	}
 
-	reg := analyze.Default(o.crossRepoPrefix, o.repoRoot)
+	newReg := o.newRegistry
+	if newReg == nil {
+		newReg = analyze.Default
+	}
+	reg := newReg(o.crossRepoPrefix, o.repoRoot)
 	groups := reg.Group(analyzeFiles)
 
-	// failedFiles tracks A/M/R files an analyzer skipped via a per-file soft error
-	// (res.FailedFiles: an unreadable or unparseable single file). These files must
-	// be excluded from the reconcile set so the server does not purge their existing
-	// chunks when no replacement was produced. These soft errors stay tolerant: they
-	// are deterministic and file-local, and failing on them would wedge ingestion
-	// forever on a permanently-malformed file. Deleted files are unaffected: they
-	// never go through analyze and must always be reconciled.
+	// failedFiles tracks A/M/R files excluded from the chunk reconcile set so the
+	// server does not purge their existing chunks when no replacement was produced.
+	// Two sources feed it:
+	//   - per-file soft errors (res.FailedFiles): a single unreadable/unparseable
+	//     file the analyzer skipped without aborting its batch.
+	//   - a quarantined analyzer group (see quarantined below).
+	// Both are deterministic and file-local; failing the run on them would wedge
+	// ingestion. Deleted files are unaffected: they never go through analyze and
+	// must always be reconciled.
 	failedFiles := make(map[string]struct{})
 
-	// incomplete is set when an analyzer hard-errors (whole-batch failure, e.g. a
-	// go/packages load fault or a recovered tree-sitter error). A hard failure means
-	// that analyzer's files contribute no entities/edges/chunks, so pushing now would
-	// reconcile-purge their stale rows with no replacement - a destructive partial
-	// graph - and the operator would advance HEAD past it, leaving a permanent hole
-	// no incremental ingest revisits. We fail the run before any push (fail-closed):
-	// the operator leaves LastIngestedCommit unchanged and re-ingests the same window
-	// on its next reconcile, bounded by its existing ingest backoff. A silent
-	// permanent gap becomes a loud, alertable, retried failure.
-	var incomplete bool
-	var firstAnalyzerErr error
+	// quarantined tracks files whose analyzer HARD-errored (whole-batch failure,
+	// e.g. a go/packages load fault or a recovered tree-sitter panic). The analyzer
+	// produced no entities/edges/chunks for them, so they are excluded from BOTH the
+	// graph Files set and the chunk reconcile set: reconciling over them would purge
+	// their last-good rows with no replacement (the destructive partial #16 guards
+	// against). This completes the fail-closed design (#16) into fail-isolated:
+	// instead of aborting the whole run on a hard error, only the failing group is
+	// held at its last-good version while every healthy group and future commit keeps
+	// flowing. The poison files are re-analyzed the next time they (or, for
+	// go/packages, any file in their package) re-enter the diff. quarantined is a
+	// subset of failedFiles.
+	quarantined := make(map[string]struct{})
 
 	var agg analyze.Result
 	for _, a := range reg.Analyzers() {
@@ -139,11 +149,18 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 		res, err := a.Analyze(ctx, o.repoRoot, fs)
 		aDur := time.Since(aStart)
 		if err != nil {
-			slog.Warn("analyzer failed", "analyzer", a.Name(), "error", err)
+			// Hard error: quarantine this analyzer's whole file group instead of
+			// aborting the run. The files keep their last-good graph and chunk rows
+			// (excluded from both reconcile sets below) while the rest of the run
+			// completes. WARN loudly with the paths so operator#68 alerting and a
+			// human can see a file's graph is being held stale rather than updated.
+			slog.Warn("analyzer hard-errored; quarantining its file group, last-good graph and chunks preserved",
+				"analyzer", a.Name(), "files", len(fs), "paths", fs, "error", err)
 			m.AnalyzerParseErrorsTotal.WithLabelValues(a.Name()).Inc()
-			incomplete = true
-			if firstAnalyzerErr == nil {
-				firstAnalyzerErr = fmt.Errorf("analyzer %s: %w", a.Name(), err)
+			m.IngestFilesQuarantinedTotal.WithLabelValues(a.Name()).Add(float64(len(fs)))
+			for _, f := range fs {
+				quarantined[f] = struct{}{}
+				failedFiles[f] = struct{}{}
 			}
 			continue
 		}
@@ -172,14 +189,6 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 		agg.Hyperedges = append(agg.Hyperedges, res.Hyperedges...)
 	}
 
-	// Fail-closed: a hard analyzer error means the AST graph is known-incomplete.
-	// Refuse to push (a partial reconcile would purge the failed files' rows) and
-	// return non-nil so the Job exits non-zero and the operator retries the same
-	// window. Per-file soft errors (failedFiles) do not trip this gate.
-	if incomplete {
-		return fmt.Errorf("ingest incomplete, refusing destructive partial push: %w", firstAnalyzerErr)
-	}
-
 	if len(touched) == 0 {
 		commit := headCommit(o.repoRoot)
 		slog.Info("ingest no-op: no changed files", "repo", o.repoName, "commit", commit)
@@ -189,21 +198,43 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 	commit := headCommit(o.repoRoot)
 	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval))
 
-	pushStart := time.Now()
-	if _, err := cl.PushGraph(ctx, contract.GraphPush{
-		Repo: o.repoName, Commit: commit, Extractor: contract.ExtractorAST, Files: touched,
-		Entities: agg.Entities, Edges: agg.Edges, Symbols: agg.Symbols,
-		Hyperedges: agg.Hyperedges,
-	}); err != nil {
-		m.PushRequestsTotal.WithLabelValues("/code-graph:bulk", "err").Inc()
-		return err
+	// graphFiles is the graph reconcile scope: touched minus quarantined. A
+	// quarantined group's analyzer emitted no entities, so leaving its files in
+	// Files would reconcile-purge their last-good graph rows with no replacement.
+	// Deleted and renamed-old paths are never quarantined (never analyzed) and stay
+	// in graphFiles so their stale rows are still purged correctly.
+	graphFiles := touched
+	if len(quarantined) > 0 {
+		graphFiles = make([]string, 0, len(touched))
+		for _, f := range touched {
+			if _, q := quarantined[f]; !q {
+				graphFiles = append(graphFiles, f)
+			}
+		}
 	}
-	m.PushRequestsTotal.WithLabelValues("/code-graph:bulk", "ok").Inc()
-	m.IngestStageDuration.WithLabelValues("push_graph").Observe(time.Since(pushStart).Seconds())
 
-	// Build reconcile list: exclude files whose analyzer failed so existing chunks
-	// are not purged when no replacement was produced. Deleted files (not in
-	// failedFiles since they are never analyzed) are always reconciled.
+	// When every touched file was quarantined (all A/M/R files in failing groups and
+	// no deletions/renames) there is nothing healthy to push and the server rejects
+	// an empty Files set. Skip the graph push but still advance the commit so future
+	// windows keep flowing.
+	if len(graphFiles) > 0 {
+		pushStart := time.Now()
+		if _, err := cl.PushGraph(ctx, contract.GraphPush{
+			Repo: o.repoName, Commit: commit, Extractor: contract.ExtractorAST, Files: graphFiles,
+			Entities: agg.Entities, Edges: agg.Edges, Symbols: agg.Symbols,
+			Hyperedges: agg.Hyperedges,
+		}); err != nil {
+			m.PushRequestsTotal.WithLabelValues("/code-graph:bulk", "err").Inc()
+			return err
+		}
+		m.PushRequestsTotal.WithLabelValues("/code-graph:bulk", "ok").Inc()
+		m.IngestStageDuration.WithLabelValues("push_graph").Observe(time.Since(pushStart).Seconds())
+	}
+
+	// Build reconcile list: exclude files whose analyzer failed (soft per-file errors
+	// and quarantined groups, both in failedFiles) so existing chunks are not purged
+	// when no replacement was produced. Deleted files (not in failedFiles since they
+	// are never analyzed) are always reconciled.
 	var reconcile []string
 	if !changes.FullSet {
 		for _, f := range touched {
@@ -226,6 +257,7 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 	slog.Info("ingest complete",
 		"repo", o.repoName, "files", len(touched),
 		"analyzed", len(analyzeFiles),
+		"quarantined", len(quarantined),
 		"entities", len(agg.Entities), "edges", len(agg.Edges),
 		"chunks", len(agg.Chunks), "symbols", len(agg.Symbols),
 		"full", changes.FullSet,
