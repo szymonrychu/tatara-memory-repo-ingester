@@ -122,6 +122,56 @@ func TestPushChunksReconcileOnlyDeletion(t *testing.T) {
 	require.Empty(t, gotReq.Items)
 }
 
+func TestPushChunksReconcileOnly200IsSuccess(t *testing.T) {
+	// Regression for #22: a reconcile-only bulk (reconcile_files set, no items,
+	// e.g. a Dockerfile-only diff that yields zero embeddable chunks) completes
+	// synchronously on the server, which returns HTTP 200 + a terminal succeeded
+	// job (there is no async job to poll). PushChunks must treat 200 as success
+	// and must NOT poll /ingest-jobs. Previously it hard-required 202 and failed
+	// the whole run, wedging incremental ingest in an infinite backoff loop.
+	var posted bool
+	var polled bool
+	var gotReq contract.BulkMemoriesRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/memories:bulk":
+			posted = true
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&gotReq))
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{Status: contract.JobSucceeded})
+		case strings.HasPrefix(r.URL.Path, "/ingest-jobs/"):
+			polled = true
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{Status: contract.JobSucceeded})
+		}
+	}))
+	defer srv.Close()
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	err := c.PushChunks(context.Background(), "tatara-claude-code-wrapper", []string{"Dockerfile"}, nil)
+	require.NoError(t, err, "reconcile-only push returning 200 must be a synchronous success")
+	require.True(t, posted, "reconcile-only must still POST /memories:bulk")
+	require.False(t, polled, "200 is synchronous-terminal; must not poll /ingest-jobs")
+	require.Equal(t, []string{"Dockerfile"}, gotReq.ReconcileFiles)
+	require.Empty(t, gotReq.Items)
+}
+
+func TestPushChunks200NonTerminalIsError(t *testing.T) {
+	// A 200 must carry a terminal job (the work is done). A 200 with a
+	// non-terminal status violates the server contract and must error rather
+	// than be silently swallowed as success.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/memories:bulk" {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(contract.IngestJob{ID: "j1", Status: "running"})
+			return
+		}
+		t.Errorf("must not poll /ingest-jobs on a 200 response")
+	}))
+	defer srv.Close()
+	c := push.New(srv.URL, http.DefaultClient, time.Millisecond)
+	err := c.PushChunks(context.Background(), "r", []string{"gone.go"}, nil)
+	require.Error(t, err, "200 with a non-terminal job must be an error")
+}
+
 func TestPushChunksSendsRepoWhenReconciling(t *testing.T) {
 	// RED: PushChunks must include "repo" in the JSON body when reconcile_files is
 	// non-empty. Without the Repo field the memory API returns 400
