@@ -43,7 +43,7 @@ func New(base string, hc *http.Client, pollInterval time.Duration) *Client {
 func (c *Client) PushGraph(ctx context.Context, p contract.GraphPush) (contract.PushResult, error) {
 	start := time.Now()
 	var res contract.PushResult
-	if err := c.doWithRetry(ctx, http.MethodPost, "/code-graph:bulk", p, http.StatusOK, &res); err != nil {
+	if _, err := c.doWithRetry(ctx, http.MethodPost, "/code-graph:bulk", p, &res, http.StatusOK); err != nil {
 		return contract.PushResult{}, err
 	}
 	slog.Info("PushGraph",
@@ -78,33 +78,45 @@ func (c *Client) PushChunks(ctx context.Context, repo string, reconcileFiles []s
 	var polls int
 	var job contract.IngestJob
 	body := contract.BulkMemoriesRequest{Repo: repo, ReconcileFiles: reconcileFiles, Items: items}
-	if err := c.doWithRetry(ctx, http.MethodPost, "/memories:bulk", body, http.StatusAccepted, &job); err != nil {
+	// 200 means the server completed the work synchronously (e.g. a reconcile-only
+	// bulk with zero embeddable items) and the body carries the terminal job, so
+	// there is nothing to poll. 202 means the bulk was accepted for async
+	// processing and we poll /ingest-jobs/{id} to a terminal state.
+	status, err := c.doWithRetry(ctx, http.MethodPost, "/memories:bulk", body, &job, http.StatusOK, http.StatusAccepted)
+	if err != nil {
 		return err
 	}
 
-	// Bound how long we poll so a stuck job does not block forever.
-	pollCtx, cancel := context.WithTimeout(ctx, maxJobWait)
-	defer cancel()
+	if status == http.StatusAccepted {
+		// Bound how long we poll so a stuck job does not block forever.
+		pollCtx, cancel := context.WithTimeout(ctx, maxJobWait)
+		defer cancel()
 
-	for !job.Terminal() {
-		polls++
-		select {
-		case <-pollCtx.Done():
-			return jobTimeoutErr(job, pollCtx.Err())
-		case <-time.After(c.pollInterval):
-		}
-		// Retry transient poll errors: a momentary 502/503 on the status read
-		// must not abort an in-flight job. 4xx (job gone) is not retried.
-		if err := c.doWithRetry(pollCtx, http.MethodGet, "/ingest-jobs/"+job.ID, nil, http.StatusOK, &job); err != nil {
-			// A deadline that lands mid-request surfaces here as a context error
-			// from the HTTP call rather than via the select above. Report the
-			// same self-describing job state so the timeout is diagnosable
-			// regardless of where the deadline fell.
-			if pollCtx.Err() != nil {
+		for !job.Terminal() {
+			polls++
+			select {
+			case <-pollCtx.Done():
 				return jobTimeoutErr(job, pollCtx.Err())
+			case <-time.After(c.pollInterval):
 			}
-			return err
+			// Retry transient poll errors: a momentary 502/503 on the status read
+			// must not abort an in-flight job. 4xx (job gone) is not retried.
+			if _, err := c.doWithRetry(pollCtx, http.MethodGet, "/ingest-jobs/"+job.ID, nil, &job, http.StatusOK); err != nil {
+				// A deadline that lands mid-request surfaces here as a context error
+				// from the HTTP call rather than via the select above. Report the
+				// same self-describing job state so the timeout is diagnosable
+				// regardless of where the deadline fell.
+				if pollCtx.Err() != nil {
+					return jobTimeoutErr(job, pollCtx.Err())
+				}
+				return err
+			}
 		}
+	} else if !job.Terminal() {
+		// 200 is a synchronous completion: the body must carry a terminal job.
+		// A non-terminal 200 violates the server contract; fail loudly rather
+		// than silently treat unfinished work as done.
+		return fmt.Errorf("/memories:bulk returned 200 with non-terminal job %s status=%q", job.ID, job.Status)
 	}
 	if job.Status != contract.JobSucceeded {
 		return fmt.Errorf("ingest job %s ended %s (failed=%d)", job.ID, job.Status, job.Failed)
@@ -125,7 +137,7 @@ func (c *Client) PushChunks(ctx context.Context, repo string, reconcileFiles []s
 func (c *Client) SemanticMisses(ctx context.Context, req contract.SemanticMissesRequest) ([]string, error) {
 	start := time.Now()
 	var misses []string
-	if err := c.doWithRetry(ctx, http.MethodPost, "/code-graph/semantic-misses", req, http.StatusOK, &misses); err != nil {
+	if _, err := c.doWithRetry(ctx, http.MethodPost, "/code-graph/semantic-misses", req, &misses, http.StatusOK); err != nil {
 		return nil, err
 	}
 	slog.Info("SemanticMisses",
@@ -143,27 +155,29 @@ func (c *Client) HTTP() *http.Client { return c.http }
 
 // doWithRetry calls do() and retries on transient errors (5xx, 429, network)
 // up to maxRetries additional attempts with a fixed backoff. 4xx errors are
-// returned immediately.
-func (c *Client) doWithRetry(ctx context.Context, method, path string, in any, want int, out any) error {
+// returned immediately. It returns the HTTP status code observed on the
+// successful attempt so callers that accept more than one status (e.g. 200 vs
+// 202) can branch on which one the server returned.
+func (c *Client) doWithRetry(ctx context.Context, method, path string, in, out any, want ...int) (int, error) {
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return 0, ctx.Err()
 			case <-time.After(retryDelay):
 			}
 		}
-		err := c.do(ctx, method, path, in, want, out)
+		status, err := c.do(ctx, method, path, in, out, want...)
 		if err == nil {
-			return nil
+			return status, nil
 		}
 		lastErr = err
 		if !isTransient(err) {
-			return err
+			return status, err
 		}
 	}
-	return lastErr
+	return 0, lastErr
 }
 
 // transientError wraps an error that is eligible for retry.
@@ -178,18 +192,18 @@ func isTransient(err error) bool {
 	return ok
 }
 
-func (c *Client) do(ctx context.Context, method, path string, in any, want int, out any) error {
+func (c *Client) do(ctx context.Context, method, path string, in, out any, want ...int) (int, error) {
 	var rdr io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
 		if err != nil {
-			return fmt.Errorf("marshal %s: %w", path, err)
+			return 0, fmt.Errorf("marshal %s: %w", path, err)
 		}
 		rdr = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rdr)
 	if err != nil {
-		return fmt.Errorf("request %s: %w", path, err)
+		return 0, fmt.Errorf("request %s: %w", path, err)
 	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -197,28 +211,38 @@ func (c *Client) do(ctx context.Context, method, path string, in any, want int, 
 	resp, err := c.http.Do(req)
 	if err != nil {
 		// Network/transport errors are transient.
-		return &transientError{cause: fmt.Errorf("call %s: %w", path, err)}
+		return 0, &transientError{cause: fmt.Errorf("call %s: %w", path, err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != want {
+	if !statusAccepted(resp.StatusCode, want) {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		// Drain the remainder so the connection can be returned to the keep-alive
 		// pool - critical on the retry path where 5xx/429 responses are common.
 		_, _ = io.Copy(io.Discard, resp.Body)
 		err := fmt.Errorf("%s: status %d: %s", path, resp.StatusCode, string(b))
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			return &transientError{cause: err}
+			return resp.StatusCode, &transientError{cause: err}
 		}
-		return err
+		return resp.StatusCode, err
 	}
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			return fmt.Errorf("decode %s: %w", path, err)
+			return resp.StatusCode, fmt.Errorf("decode %s: %w", path, err)
 		}
 	}
 	// Drain any unread bytes so the underlying TCP connection can be reused
 	// (HTTP keep-alive). json.Decoder stops at the first JSON value; trailing
 	// newlines are common and would otherwise prevent connection reuse.
 	_, _ = io.Copy(io.Discard, resp.Body)
-	return nil
+	return resp.StatusCode, nil
+}
+
+// statusAccepted reports whether got is one of the acceptable status codes.
+func statusAccepted(got int, want []int) bool {
+	for _, w := range want {
+		if got == w {
+			return true
+		}
+	}
+	return false
 }
