@@ -30,6 +30,11 @@ type Metrics struct {
 	AnalyzerEdgesTotal       *prometheus.CounterVec   // labels: language
 	AnalyzerParseErrorsTotal *prometheus.CounterVec   // labels: language
 	AnalyzerDuration         *prometheus.HistogramVec // labels: language
+	// IngestFilesQuarantinedTotal counts diff-set files held at their last-good
+	// graph+chunk rows because their analyzer hard-errored (labels: language, the
+	// analyzer name). Reuses the language label so it correlates with the other
+	// analyzer_* series on dashboards and alerts (operator#68).
+	IngestFilesQuarantinedTotal *prometheus.CounterVec
 
 	// SCIP counters.
 	SCIPEntitiesTotal prometheus.Counter
@@ -89,6 +94,10 @@ func New() *Metrics {
 		Help:    "Time spent in each language analyzer.",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"language"})
+	m.IngestFilesQuarantinedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ingest_files_quarantined_total",
+		Help: "Total diff-set files quarantined because their analyzer hard-errored (excluded from graph Files and chunk reconcile to preserve their last-good rows).",
+	}, []string{"language"})
 
 	m.SCIPEntitiesTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "scip_entities_total",
@@ -114,6 +123,7 @@ func New() *Metrics {
 		m.AnalyzerEdgesTotal,
 		m.AnalyzerParseErrorsTotal,
 		m.AnalyzerDuration,
+		m.IngestFilesQuarantinedTotal,
 		m.SCIPEntitiesTotal,
 		m.SCIPEdgesTotal,
 		m.SemanticChunkExtractionsTotal,

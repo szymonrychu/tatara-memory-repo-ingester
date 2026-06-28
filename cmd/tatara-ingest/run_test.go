@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/analyze"
 	"github.com/szymonrychu/tatara-memory-repo-ingester/internal/contract"
 )
 
@@ -909,12 +911,25 @@ func TestRunAnalyzerFailureDoesNotPurgeFiles(t *testing.T) {
 		"file whose analyzer failed must NOT be in reconcile_files (would purge chunks with no replacement)")
 }
 
-// TestRunHardAnalyzerErrorFailsClosed verifies the fail-closed gate: when an
-// analyzer hard-errors (whole-batch failure, not a per-file soft error), run must
-// return a non-nil error and must NOT push a partial graph or chunks. We force a
-// hard error with a pre-cancelled context: the Python analyzer returns
-// "analyze cancelled" from its file loop, which trips the incomplete gate.
-func TestRunHardAnalyzerErrorFailsClosed(t *testing.T) {
+// hardFailAnalyzer is a test analyzer that hard-errors on Analyze. It is injected
+// via options.newRegistry to exercise the quarantine path deterministically (a
+// real go/packages load fault is hard to trigger reproducibly).
+type hardFailAnalyzer struct{}
+
+func (hardFailAnalyzer) Name() string        { return "boom" }
+func (hardFailAnalyzer) Match(p string) bool { return strings.HasSuffix(p, ".boom") }
+func (hardFailAnalyzer) Analyze(_ context.Context, _ string, _ []string) (analyze.Result, error) {
+	return analyze.Result{}, errors.New("simulated hard analyzer error")
+}
+
+// TestRunHardAnalyzerErrorQuarantinesNotWedges verifies the fail-isolated behavior
+// that replaced the old fail-closed gate: a hard analyzer error (whole-batch
+// failure) no longer aborts the whole run. A pre-cancelled context makes the Python
+// analyzer hard-error ("analyze cancelled") for the only changed file, so that file
+// is quarantined and run returns nil (so the operator advances LastIngestedCommit
+// and ingestion is never wedged). Because the only file was quarantined and there
+// are no deletions, no destructive partial push happens.
+func TestRunHardAnalyzerErrorQuarantinesNotWedges(t *testing.T) {
 	dir := t.TempDir()
 	for _, a := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
 		c := exec.Command("git", a...)
@@ -948,12 +963,93 @@ func TestRunHardAnalyzerErrorFailsClosed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel: the Python analyzer hard-errors with "analyze cancelled"
 
-	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, since: base}
-	err := run(ctx, opts, http.DefaultClient)
-	require.Error(t, err, "a hard analyzer error must fail the run (fail-closed)")
-	require.Contains(t, err.Error(), "ingest incomplete")
-	require.Zero(t, graphPushes.Load(), "no graph push when the graph is known-incomplete")
-	require.Zero(t, chunkPushes.Load(), "no chunk push when the graph is known-incomplete")
+	// getenv returns "" so the best-effort semantic stage is skipped deterministically.
+	opts := options{repoRoot: dir, repoName: "m", baseURL: srv.URL, since: base,
+		getenv: func(string) string { return "" }}
+	// The hard error no longer wedges the run: it quarantines the failing group and
+	// returns nil so the operator advances the commit instead of retrying forever.
+	require.NoError(t, run(ctx, opts, http.DefaultClient))
+	require.Zero(t, graphPushes.Load(), "no graph push when the only changed file is quarantined")
+	require.Zero(t, chunkPushes.Load(), "no chunk push when the only changed file is quarantined")
+}
+
+// TestRunQuarantinesHardErrorGroupAndPushesHealthy verifies the quarantine crux:
+// when one analyzer hard-errors while another succeeds, the run completes (exit
+// zero), pushes the healthy group, and excludes the quarantined group's files from
+// BOTH the graph Files set and the chunk reconcile set so their last-good rows are
+// preserved (never reconcile-purged). It also asserts the quarantine metric.
+func TestRunQuarantinesHardErrorGroupAndPushesHealthy(t *testing.T) {
+	dir := t.TempDir()
+	for _, a := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
+		c := exec.Command("git", a...)
+		c.Dir = dir
+		require.NoError(t, c.Run())
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "good.md"), []byte("# Good\n\nbody\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "bad.boom"), []byte("payload\n"), 0o644))
+	base := commitAll(t, dir, "init")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "good.md"), []byte("# Good\n\nbody2\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "bad.boom"), []byte("payload2\n"), 0o644))
+	commitAll(t, dir, "modify good.md and bad.boom")
+
+	var capturedPush contract.GraphPush
+	var bulkReq contract.BulkMemoriesRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph:bulk":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &capturedPush)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		case "/memories:bulk":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &bulkReq)
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		default:
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	var metricsBody string
+	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		metricsBody = string(b)
+		w.WriteHeader(200)
+	}))
+	defer metrics.Close()
+
+	opts := options{
+		repoRoot: dir, repoName: "m", baseURL: srv.URL, since: base,
+		metricsPushURL: metrics.URL,
+		getenv:         func(string) string { return "" }, // skip best-effort semantic stage
+		newRegistry: func(_, _ string) *analyze.Registry {
+			r := analyze.NewRegistry()
+			r.Register(hardFailAnalyzer{}) // .boom -> hard error (quarantined)
+			r.Register(analyze.NewDocs())  // .md  -> healthy
+			return r
+		},
+	}
+	require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+
+	// Healthy group is pushed; quarantined file is excluded from graph Files so its
+	// last-good graph rows are not reconcile-purged.
+	require.Contains(t, capturedPush.Files, "good.md", "healthy file must be in graph Files")
+	require.NotContains(t, capturedPush.Files, "bad.boom",
+		"quarantined file must NOT be in graph Files (would purge its last-good rows)")
+	for _, e := range capturedPush.Entities {
+		require.NotEqual(t, "bad.boom", e.FilePath, "quarantined file must contribute no entities")
+	}
+
+	// Quarantined file is excluded from chunk reconcile; healthy file is reconciled.
+	require.Contains(t, bulkReq.ReconcileFiles, "good.md", "healthy file must be reconciled")
+	require.NotContains(t, bulkReq.ReconcileFiles, "bad.boom",
+		"quarantined file must NOT be in reconcile_files (would purge its chunks)")
+
+	// Quarantine is reported via the metric so operator alerting can see it.
+	require.Contains(t, metricsBody, `ingest_files_quarantined_total{language="boom"} 1`,
+		"quarantine must increment ingest_files_quarantined_total for the failing analyzer")
 }
 
 // TestRunTouchedDeduplicatedForRenames verifies finding 4: when two different

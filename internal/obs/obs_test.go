@@ -28,6 +28,7 @@ func TestNewRegistersAllMetrics(t *testing.T) {
 	require.NotNil(t, m.AnalyzerEdgesTotal)
 	require.NotNil(t, m.AnalyzerParseErrorsTotal)
 	require.NotNil(t, m.AnalyzerDuration)
+	require.NotNil(t, m.IngestFilesQuarantinedTotal)
 	require.NotNil(t, m.SCIPEntitiesTotal)
 	require.NotNil(t, m.SCIPEdgesTotal)
 	require.NotNil(t, m.SemanticChunkExtractionsTotal)
