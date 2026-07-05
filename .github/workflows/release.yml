@@ -1,0 +1,49 @@
+name: release
+
+# Push-CD: gated on a green ci run for a push-to-main (which includes the image
+# build+publish). Cuts the next semver tag from the merged PR's semver:* label,
+# re-publishes the image at vX.Y.Z (build.sh dual-tags vX.Y.Z + SHORT_SHA), then
+# bumps the single tatara-helmfile ingesterImage pin. Image-only; the ingester is
+# operator-provisioned, so no chart is published or pinned.
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  release:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
+    runs-on: tatara-memory-repo-ingester
+    env:
+      GITHUB_TOKEN: ${{ secrets.TATARA_CD_TOKEN }}
+      HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+      HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - name: install buildctl
+        run: |
+          curl -sSfL "https://github.com/moby/buildkit/releases/download/v0.18.2/buildkit-v0.18.2.linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local bin/buildctl
+      - name: cut semver tag
+        id: tag
+        uses: szymonrychu/tatara-helmfile/.github/actions/cd-release@main
+        with:
+          mode: tag
+          token: ${{ secrets.TATARA_CD_TOKEN }}
+      - name: publish image at version
+        run: bash .github/ci/build.sh "${{ github.event.repository.name }}"
+      - name: bump helmfile ingesterImage pin
+        uses: szymonrychu/tatara-helmfile/.github/actions/cd-release@main
+        with:
+          mode: bump
+          token: ${{ secrets.TATARA_CD_TOKEN }}
+          parent_repo: szymonrychu/tatara-helmfile
+          new_value: ${{ steps.tag.outputs.version }}
+          pins: |
+            [{"file": "values/tatara-operator/default.yaml",
+              "pattern": "^ingesterImage: \".*\"$",
+              "value_template": "ingesterImage: \"harbor.szymonrichert.pl/containers/tatara-memory-repo-ingester:{{version}}\""}]
