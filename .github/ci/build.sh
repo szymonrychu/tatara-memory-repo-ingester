@@ -19,6 +19,17 @@ DEST="harbor.szymonrichert.pl/containers/${REPO}"
 : "${HARBOR_USERNAME:?HARBOR_USERNAME required}"
 : "${HARBOR_PASSWORD:?HARBOR_PASSWORD required}"
 
+# ci.yml pushes both :SHORT_SHA (rollback traceability) and :VERSION on every
+# push to main. release.yml re-invokes this script on the SAME commit to
+# republish at the final :vX.Y.Z tag; Harbor's containers project has tag
+# immutability, so re-pushing :SHORT_SHA (already pushed by ci.yml) 412s.
+# release.yml sets PUSH_SHORT_SHA_TAG=false to push only :VERSION.
+if [ "${PUSH_SHORT_SHA_TAG:-true}" = "true" ]; then
+  TAGS="${DEST}:${SHORT_SHA},${DEST}:${VERSION}"
+else
+  TAGS="${DEST}:${VERSION}"
+fi
+
 # Per-build docker config on the runner only (never an in-cluster secret).
 # buildctl reads $DOCKER_CONFIG and forwards harbor auth to buildkitd for push.
 DOCKER_CONFIG="$(mktemp -d)"
@@ -42,6 +53,6 @@ buildctl --addr "$BUILDKITD_ADDR" build \
   --opt build-arg:COMMIT="${SHORT_SHA}" \
   --opt build-arg:DATE="${BUILD_DATE}" \
   --secret id=GIT_AUTH_TOKEN,env=GITHUB_TOKEN \
-  --output "type=image,\"name=${DEST}:${SHORT_SHA},${DEST}:${VERSION}\",push=true"
+  --output "type=image,\"name=${TAGS}\",push=true"
 
-echo "buildkit: pushed ${DEST}:${SHORT_SHA} and ${DEST}:${VERSION}"
+echo "buildkit: pushed ${TAGS}"
