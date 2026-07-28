@@ -6,7 +6,16 @@ packages, M5 SCIP v1 (`--scip` intra-repo graph ingestion), 0.2.6 bulk-repo
 contract fix (repo field in /memories:bulk body), Prometheus metrics pushed to
 the operator pushmetrics receiver at job end (`internal/obs`, `METRICS_PUSH_URL`).
 
+Shipped (cont.): bounded `/code-graph:bulk` batching (#31) - the graph push is
+split into file-atomic batches (2000 rows / 250 files) sent sequentially, with
+`Retry-After`-aware backoff on 429/503, so a whole-repo push no longer holds one
+tatara-memory Postgres transaction for minutes (tatara-memory#82).
+
 Open:
+- Async graph-push pathway: mirror `/memories:bulk`'s 202 + `/ingest-jobs/{id}`
+  contract for `/code-graph:bulk` (issue #31 options 1b/3b) so the server owns
+  back-pressure end to end. Needs a coordinated tatara-memory change; batching
+  (#31, shipped) is the client-side half.
 - M5 SCIP cross-repo: parse import/export monikers into cross_repo_symbols
   provides/requires (v1 is intra-repo only).
 - M5 SCIP: validate/fix reference-edge attribution against a real scip-go index

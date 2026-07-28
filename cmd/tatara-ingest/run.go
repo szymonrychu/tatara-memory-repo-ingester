@@ -196,7 +196,7 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 	}
 
 	commit := headCommit(o.repoRoot)
-	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval))
+	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval)).WithMetrics(m)
 
 	// graphFiles is the graph reconcile scope: touched minus quarantined. A
 	// quarantined group's analyzer emitted no entities, so leaving its files in
@@ -281,7 +281,7 @@ func runSCIP(ctx context.Context, o options, hc *http.Client, m *obs.Metrics) er
 	gp.Extractor = contract.ExtractorSCIP
 	m.SCIPEntitiesTotal.Add(float64(len(gp.Entities)))
 	m.SCIPEdgesTotal.Add(float64(len(gp.Edges)))
-	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval))
+	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval)).WithMetrics(m)
 	if _, err := cl.PushGraph(ctx, gp); err != nil {
 		m.PushRequestsTotal.WithLabelValues("/code-graph:bulk", "err").Inc()
 		return err

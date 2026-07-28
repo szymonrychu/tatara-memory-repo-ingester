@@ -25,6 +25,15 @@ type Metrics struct {
 	SemanticMissesTotal  prometheus.Counter
 	LLMCallsTotal        *prometheus.CounterVec // labels: result (ok|fail)
 
+	// Bulk-push back-pressure counters. The code graph is pushed as bounded
+	// batches (one server transaction each) instead of one whole-repo
+	// transaction, so batch count, retries and server load-shed responses are
+	// the signals that say whether the client is being throttled.
+	CodeGraphBatchesTotal  *prometheus.CounterVec // labels: result (ok|err)
+	CodeGraphBatchRows     prometheus.Histogram
+	PushRetriesTotal       *prometheus.CounterVec // labels: path, reason (shed_429|shed_503|server_5xx|network)
+	PushShedResponsesTotal *prometheus.CounterVec // labels: path, status (429|503)
+
 	// Analyzer-level counters (labels: language).
 	AnalyzerEntitiesTotal    *prometheus.CounterVec   // labels: language
 	AnalyzerEdgesTotal       *prometheus.CounterVec   // labels: language
@@ -77,6 +86,24 @@ func New() *Metrics {
 		Help: "Total LLM completion calls by result (ok|fail).",
 	}, []string{"result"})
 
+	m.CodeGraphBatchesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "code_graph_batches_total",
+		Help: "Total /code-graph:bulk batches sent by result (ok|err). One batch is one server transaction.",
+	}, []string{"result"})
+	m.CodeGraphBatchRows = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "code_graph_batch_rows",
+		Help:    "Rows (entities+edges+symbols+hyperedges) per /code-graph:bulk batch.",
+		Buckets: []float64{10, 50, 100, 250, 500, 1000, 2000, 5000, 10000},
+	})
+	m.PushRetriesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "push_retries_total",
+		Help: "Total push HTTP requests retried by path and reason (shed_429|shed_503|server_5xx|network).",
+	}, []string{"path", "reason"})
+	m.PushShedResponsesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "push_shed_responses_total",
+		Help: "Total server load-shed responses received by path and status (429|503).",
+	}, []string{"path", "status"})
+
 	m.AnalyzerEntitiesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "analyzer_entities_total",
 		Help: "Total entities emitted by each analyzer.",
@@ -119,6 +146,10 @@ func New() *Metrics {
 		m.IngestStageDuration,
 		m.SemanticMissesTotal,
 		m.LLMCallsTotal,
+		m.CodeGraphBatchesTotal,
+		m.CodeGraphBatchRows,
+		m.PushRetriesTotal,
+		m.PushShedResponsesTotal,
 		m.AnalyzerEntitiesTotal,
 		m.AnalyzerEdgesTotal,
 		m.AnalyzerParseErrorsTotal,
