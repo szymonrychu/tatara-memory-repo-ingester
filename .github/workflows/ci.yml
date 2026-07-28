@@ -7,70 +7,24 @@ on:
     branches: [main]
 
 jobs:
-  secscan:
-    runs-on: tatara-memory-repo-ingester
-    steps:
-      - uses: actions/checkout@v4
-      - name: gitleaks
-        run: |
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz" \
-            | tar -xzf - gitleaks
-          ./gitleaks detect --source . --no-git --redact --verbose
-
-  lint:
-    runs-on: tatara-memory-repo-ingester
-    steps:
-      - uses: actions/checkout@v4
-      - name: build tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential
-      - uses: jdx/mise-action@v2
-        with:
-          cache: true
-      - name: pre-commit
-        run: pre-commit run --all-files
-
-  test:
-    runs-on: tatara-memory-repo-ingester
-    steps:
-      - uses: actions/checkout@v4
-      - name: build tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential
-      - uses: jdx/mise-action@v2
-        with:
-          cache: true
-      - run: mise run test
-
-  build:
-    runs-on: tatara-memory-repo-ingester
-    needs: [secscan, lint, test]
-    steps:
-      - uses: actions/checkout@v4
-      - name: build tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential
-      - uses: jdx/mise-action@v2
-        with:
-          cache: true
-      - run: mise run build
-
-  smoke:
-    runs-on: tatara-memory-repo-ingester
-    needs: [build]
-    steps:
-      - uses: actions/checkout@v4
-      - name: build tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential
-      - uses: jdx/mise-action@v2
-        with:
-          cache: true
-      - name: smoke
-        run: |
-          mise run build
-          ./bin/tatara-ingest --help || true
+  ci:
+    uses: szymonrychu/tatara-operator/.github/workflows/ci-shared.yml@v1.35.1
+    with:
+      runner-label: tatara-memory-repo-ingester
+      smoke-binary: ./bin/tatara-ingest
+      # ingester's `make build` is CGO_ENABLED=1 (the static-analysis tooling
+      # links cgo), so build/smoke need the full C toolchain, not just make.
+      build-needs-cgo: true
+      # ingester owns its own image publish (build.sh's PUSH_SHORT_SHA_TAG
+      # toggle, reused by release.yml to avoid a duplicate immutable Harbor
+      # tag push), so the shared `image` job stays off here.
+      enable-image: false
+    secrets: inherit
 
   image:
     if: ${{ github.event_name == 'push' }}
     runs-on: tatara-memory-repo-ingester
-    needs: [secscan, lint, test, build]
+    needs: [ci]
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
