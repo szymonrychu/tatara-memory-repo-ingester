@@ -8,7 +8,7 @@ on:
 
 jobs:
   ci:
-    uses: szymonrychu/tatara-operator/.github/workflows/ci-shared.yml@v1.35.1
+    uses: szymonrychu/tatara-operator/.github/workflows/ci-shared.yml@v1.36.1
     with:
       runner-label: tatara-memory-repo-ingester
       smoke-binary: ./bin/tatara-ingest
