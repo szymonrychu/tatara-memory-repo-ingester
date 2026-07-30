@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1.7
-ARG GO_VERSION=1.25
+# Must satisfy go.mod's `go` directive: the builder runs with
+# GOTOOLCHAIN=local, so a builder older than go.mod fails `go mod download`
+# outright rather than fetching a newer toolchain.
+ARG GO_VERSION=1.26.3
 FROM golang:${GO_VERSION}-bookworm AS builder
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev git ca-certificates && rm -rf /var/lib/apt/lists/*
