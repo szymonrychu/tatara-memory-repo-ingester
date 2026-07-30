@@ -11,7 +11,11 @@ set -euo pipefail
 REPO="${1:?repo name required}"
 BUILDKITD_ADDR="tcp://buildkitd.arc-runners:1234"
 SHORT_SHA="${GITHUB_SHA:0:7}"
-VERSION="$(git describe --tags --always --dirty)"
+# release.yml passes the authoritative tag in via VERSION; git describe must not
+# be trusted to pick it, because a re-run of a release that failed after cutting
+# its tag leaves two semver tags on the same commit and describe picks the lower
+# one. ci.yml has no cut tag to pass, so it falls back to describe.
+VERSION="${VERSION:-$(git describe --tags --always --dirty)}"
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 DEST="harbor.szymonrichert.pl/containers/${REPO}"
 

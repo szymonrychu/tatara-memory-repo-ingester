@@ -37,9 +37,13 @@ jobs:
           token: ${{ secrets.TATARA_CD_TOKEN }}
       - name: publish image at version
         # ci.yml already pushed :SHORT_SHA on this commit; Harbor immutability
-        # 412s on re-push, so skip it here and publish only :VERSION.
+        # 412s on re-push, so skip it here and publish only :VERSION. VERSION is
+        # passed explicitly from the cut-tag step's output, not derived from
+        # git describe: a re-run of a release that failed after tagging leaves
+        # two semver tags on this commit and describe would pick the lower one.
         env:
           PUSH_SHORT_SHA_TAG: "false"
+          VERSION: ${{ steps.tag.outputs.version }}
         run: bash .github/ci/build.sh "${{ github.event.repository.name }}"
       - name: bump helmfile ingesterImage pin
         uses: szymonrychu/tatara-helmfile/.github/actions/cd-release@main
