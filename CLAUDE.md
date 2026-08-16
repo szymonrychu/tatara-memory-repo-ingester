@@ -194,7 +194,6 @@ is local to this repo and is never touched by the sync, which is where a repo
 records how these rules apply to it.
 <!-- END tatara-shared-contract -->
 
-
 ## Local notes
 
 - The modularity contract: adding a language touches exactly one file in
