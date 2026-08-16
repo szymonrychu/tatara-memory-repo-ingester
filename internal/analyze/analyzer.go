@@ -48,8 +48,16 @@ type Result struct {
 	ParseErrors int
 	// FailedFiles lists the repo-relative diff-set paths whose read or parse failed
 	// (and were skipped without aborting the batch). The caller MUST exclude these
-	// from the reconcile set so existing chunks are not purged with no replacement.
+	// from BOTH reconcile scopes - the graph push Files set and the chunk
+	// reconcile set - so existing rows are not purged with no replacement.
 	// Only diff-set files appear here; repo-index-only read failures are irrelevant.
+	//
+	// A listed file is treated as having produced nothing: the caller DROPS every
+	// entity, edge, symbol, hyperedge and chunk owned by it, because a row naming
+	// a file outside the push Files set makes tatara-memory reject the whole push
+	// (ErrInvalidScope). Emitting rows for a file before discovering it failed is
+	// therefore safe (helm's processTemplate does exactly that), but those rows do
+	// not survive.
 	FailedFiles []string
 }
 

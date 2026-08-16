@@ -1052,6 +1052,164 @@ func TestRunQuarantinesHardErrorGroupAndPushesHealthy(t *testing.T) {
 		"quarantine must increment ingest_files_quarantined_total for the failing analyzer")
 }
 
+// softFailAnalyzer is a test analyzer that emits a full row set for its file and
+// THEN reports that file as a soft per-file failure - the ordering helm's
+// processTemplate has (entity appended before the read/parse that fails). It
+// exists to pin both halves of the FailedFiles contract: the file is excluded
+// from both reconcile scopes, and the rows it already emitted are dropped.
+type softFailAnalyzer struct{}
+
+func (softFailAnalyzer) Name() string        { return "soft" }
+func (softFailAnalyzer) Match(p string) bool { return strings.HasSuffix(p, ".soft") }
+func (softFailAnalyzer) Analyze(_ context.Context, _ string, files []string) (analyze.Result, error) {
+	var res analyze.Result
+	for _, f := range files {
+		res.Entities = append(res.Entities, contract.Entity{
+			ID: "soft:" + f, Name: f, Type: contract.EntityFile, FilePath: f,
+		})
+		res.Edges = append(res.Edges, contract.Edge{
+			From: "soft:" + f, To: "soft:other", Relation: contract.RelReferences, SrcFile: f,
+		})
+		res.Symbols = append(res.Symbols, contract.SymbolRow{
+			Symbol: "soft/" + f, Lang: "soft", Kind: "file",
+			Role: contract.RoleProvides, EntityID: "soft:" + f, SrcFile: f,
+		})
+		res.Chunks = append(res.Chunks, contract.Chunk{
+			EntityID: "soft:" + f, Type: contract.EntityFile, FilePath: f,
+			Language: "soft", Header: "[soft] " + f, Body: "body",
+		})
+		res.ParseErrors++
+		res.FailedFiles = append(res.FailedFiles, f)
+	}
+	return res, nil
+}
+
+// TestRunFailedFilesExcludedFromBothReconcileScopes is the symmetry property:
+// a file the analyzer could not produce rows for is absent from BOTH the graph
+// Files set and the chunk reconcile set, whether it failed softly (one file) or
+// was quarantined by a hard error (whole group). Asserted on both the
+// incremental and the FullSet path, because FullSet skips the chunk reconcile
+// but still sends graph Files.
+//
+// It also pins the choke-point row filter: rows a soft-failing analyzer already
+// emitted for the failed file must be dropped, or the server rejects the whole
+// push with 400 ErrInvalidScope (every edge/symbol src_file and every non-empty
+// entity file_path must be in Files).
+func TestRunFailedFilesExcludedFromBothReconcileScopes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		full bool
+	}{
+		{name: "incremental", full: false},
+		{name: "fullset", full: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := newGitRepo(t)
+			write := func(name, body string) {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644))
+			}
+			write("ok.md", "# Ok\n\nbody\n")
+			write("f.soft", "payload\n")
+			write("g.boom", "payload\n")
+			base := commitAll(t, dir, "init")
+			if !tc.full {
+				write("ok.md", "# Ok\n\nbody2\n")
+				write("f.soft", "payload2\n")
+				write("g.boom", "payload2\n")
+				commitAll(t, dir, "touch all three")
+			}
+
+			var graphPush contract.GraphPush
+			var bulkReq contract.BulkMemoriesRequest
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/code-graph:bulk":
+					body, _ := io.ReadAll(r.Body)
+					_ = json.Unmarshal(body, &graphPush)
+					w.WriteHeader(200)
+					_, _ = w.Write([]byte(`{"repo":"m"}`))
+				case "/memories:bulk":
+					body, _ := io.ReadAll(r.Body)
+					_ = json.Unmarshal(body, &bulkReq)
+					w.WriteHeader(202)
+					_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+				default:
+					_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+				}
+			}))
+			defer srv.Close()
+
+			var metricsBody string
+			metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				metricsBody = string(b)
+				w.WriteHeader(200)
+			}))
+			defer metrics.Close()
+
+			opts := options{
+				repoRoot: dir, repoName: "m", baseURL: srv.URL,
+				metricsPushURL: metrics.URL,
+				getenv:         func(string) string { return "" }, // skip best-effort semantic stage
+				newRegistry: func(_, _ string) *analyze.Registry {
+					r := analyze.NewRegistry()
+					r.Register(softFailAnalyzer{}) // .soft -> per-file soft failure
+					r.Register(hardFailAnalyzer{}) // .boom -> hard error (quarantined)
+					r.Register(analyze.NewDocs())  // .md   -> healthy
+					return r
+				},
+			}
+			if tc.full {
+				opts.full = true
+			} else {
+				opts.since = base
+			}
+			require.NoError(t, run(context.Background(), opts, http.DefaultClient))
+
+			// Graph scope: healthy file present, both failure kinds absent.
+			require.Contains(t, graphPush.Files, "ok.md", "healthy file must be in graph Files")
+			require.NotContains(t, graphPush.Files, "f.soft",
+				"soft-failed file must NOT be in graph Files (would purge its last-good rows)")
+			require.NotContains(t, graphPush.Files, "g.boom",
+				"quarantined file must NOT be in graph Files")
+
+			// Chunk scope: same subtraction on the incremental path; FullSet is insert-only.
+			if tc.full {
+				require.Empty(t, bulkReq.ReconcileFiles, "full/first ingest is insert-only")
+			} else {
+				require.Contains(t, bulkReq.ReconcileFiles, "ok.md", "healthy file must be reconciled")
+				require.NotContains(t, bulkReq.ReconcileFiles, "f.soft",
+					"soft-failed file must NOT be in reconcile_files (would purge its chunks)")
+				require.NotContains(t, bulkReq.ReconcileFiles, "g.boom",
+					"quarantined file must NOT be in reconcile_files")
+			}
+
+			// Choke point: no pushed row may name a failed file, or the server 400s the
+			// whole push with ErrInvalidScope.
+			failed := map[string]bool{"f.soft": true, "g.boom": true}
+			for _, e := range graphPush.Entities {
+				require.False(t, failed[e.FilePath], "entity %s scoped to failed file %q", e.ID, e.FilePath)
+			}
+			for _, e := range graphPush.Edges {
+				require.False(t, failed[e.SrcFile], "edge %s->%s scoped to failed file %q", e.From, e.To, e.SrcFile)
+			}
+			for _, s := range graphPush.Symbols {
+				require.False(t, failed[s.SrcFile], "symbol %s scoped to failed file %q", s.Symbol, s.SrcFile)
+			}
+			for _, it := range bulkReq.Items {
+				require.False(t, failed[it.Metadata["file_path"]],
+					"chunk item scoped to failed file %q", it.Metadata["file_path"])
+			}
+
+			// Both failure kinds are reported, on their own series.
+			require.Contains(t, metricsBody, `ingest_files_soft_failed_total{language="soft"} 1`,
+				"a soft per-file failure must increment ingest_files_soft_failed_total")
+			require.Contains(t, metricsBody, `ingest_files_quarantined_total{language="boom"} 1`,
+				"quarantine reporting must not regress")
+		})
+	}
+}
+
 // TestRunTouchedDeduplicatedForRenames verifies finding 4: when two different
 // renames share the same old or new path (edge case) or any duplication occurs,
 // the code-graph Files and reconcile_files must not contain duplicate entries.

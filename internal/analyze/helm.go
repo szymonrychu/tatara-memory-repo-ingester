@@ -243,6 +243,11 @@ func (ha *helmAnalyzer) processTemplate(repoRoot, relPath, chartName string, res
 	raw, err := os.ReadFile(absPath) //nolint:gosec // analyzer reads arbitrary repo files by design
 	if err != nil {
 		ha.log.Warn("helm: cannot read template", "path", relPath, "err", err)
+		// Same soft-failure contract as the parse branch below: the entity above is
+		// all this file produced (no edges, no chunk), so it must be excluded from
+		// both reconcile scopes or its last-good edges are purged with no
+		// replacement. The caller drops the entity too.
+		res.FailedFiles = append(res.FailedFiles, relPath)
 		return
 	}
 

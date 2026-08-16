@@ -312,6 +312,30 @@ func TestHelmAnalyzer_EmptyChartName(t *testing.T) {
 	require.Empty(t, res.Entities, "no entities should be emitted when Chart.yaml has no name")
 }
 
+// TestHelmAnalyzer_UnreadableTemplateRecordedAsFailed pins the read-failure half
+// of the template contract: an unreadable template emits its helm_template entity
+// but no edges and no chunk, so it must be reported in FailedFiles - exactly as
+// the parse-failure branch does. Without it the file stays in both reconcile
+// scopes and its last-good edges are purged with no replacement.
+func TestHelmAnalyzer_UnreadableTemplateRecordedAsFailed(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("test requires non-root: chmod 000 is ineffective as root")
+	}
+	td := t.TempDir()
+	require.NoError(t, writeFile(td, "Chart.yaml", "apiVersion: v2\nname: unreadable\nversion: 0.1.0\n"))
+	require.NoError(t, mkdirFile(td, "templates/deployment.yaml", "kind: Deployment\n"))
+	tmpl := filepath.Join(td, "templates", "deployment.yaml")
+	require.NoError(t, os.Chmod(tmpl, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(tmpl, 0o600) })
+
+	a := analyze.NewHelm(td)
+	files := []string{"Chart.yaml", "templates/deployment.yaml"}
+	res, err := a.Analyze(context.Background(), td, files)
+	require.NoError(t, err, "an unreadable template is a per-file soft failure, not a batch error")
+	require.Contains(t, res.FailedFiles, "templates/deployment.yaml",
+		"unreadable template must be reported in FailedFiles")
+}
+
 // TestHelmAnalyzer_EdgeDedup verifies finding 5:
 // duplicate value_ref and includes edges from the same template are emitted only once.
 func TestHelmAnalyzer_EdgeDedup(t *testing.T) {

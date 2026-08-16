@@ -44,6 +44,14 @@ type Metrics struct {
 	// analyzer name). Reuses the language label so it correlates with the other
 	// analyzer_* series on dashboards and alerts (operator#68).
 	IngestFilesQuarantinedTotal *prometheus.CounterVec
+	// IngestFilesSoftFailedTotal counts diff-set files held at their last-good
+	// graph+chunk rows because the analyzer could not read or parse that one file
+	// but kept its batch (labels: language). Deliberately a sibling series rather
+	// than a reason label on IngestFilesQuarantinedTotal: quarantine is a
+	// zero-base-rate hard-error signal alerted at >0, soft failures have a nonzero
+	// steady state (an unparseable file fails on every diff that touches it), and
+	// folding them together would make the quarantine alert fire continuously.
+	IngestFilesSoftFailedTotal *prometheus.CounterVec
 
 	// SCIP counters.
 	SCIPEntitiesTotal prometheus.Counter
@@ -125,6 +133,10 @@ func New() *Metrics {
 		Name: "ingest_files_quarantined_total",
 		Help: "Total diff-set files quarantined because their analyzer hard-errored (excluded from graph Files and chunk reconcile to preserve their last-good rows).",
 	}, []string{"language"})
+	m.IngestFilesSoftFailedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ingest_files_soft_failed_total",
+		Help: "Total diff-set files whose read or parse failed inside an otherwise healthy analyzer batch (excluded from graph Files and chunk reconcile to preserve their last-good rows).",
+	}, []string{"language"})
 
 	m.SCIPEntitiesTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "scip_entities_total",
@@ -155,6 +167,7 @@ func New() *Metrics {
 		m.AnalyzerParseErrorsTotal,
 		m.AnalyzerDuration,
 		m.IngestFilesQuarantinedTotal,
+		m.IngestFilesSoftFailedTotal,
 		m.SCIPEntitiesTotal,
 		m.SCIPEdgesTotal,
 		m.SemanticChunkExtractionsTotal,
