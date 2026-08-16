@@ -192,6 +192,11 @@ func (ha *helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 				rawValues, err := os.ReadFile(absValues) //nolint:gosec // analyzer reads arbitrary repo files by design
 				if err != nil {
 					ha.log.Warn("helm: cannot read values.yaml", "path", valuesPath, "err", err)
+					// helm:value entities are the only rows values.yaml produces; without
+					// this the file stays in both reconcile scopes and every one of them
+					// is purged with no replacement (same asymmetry as the template read
+					// branch in processTemplate).
+					res.FailedFiles = append(res.FailedFiles, valuesPath)
 					break
 				}
 				var flat map[string]any
