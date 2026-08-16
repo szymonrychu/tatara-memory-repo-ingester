@@ -37,6 +37,11 @@ func (d docsAnalyzer) Analyze(_ context.Context, repoRoot string, files []string
 		b, err := os.ReadFile(filepath.Join(repoRoot, f)) //nolint:gosec
 		if err != nil {
 			d.log.Warn("docs: unreadable file; skipping", "file", f, "error", err)
+			// A doc file produces exactly one entity and one chunk, so an unreadable
+			// one loses BOTH surfaces if it stays in scope: the graph purges its
+			// doc_file entity and the chunk reconcile purges its chunk, neither with a
+			// replacement.
+			res.FailedFiles = append(res.FailedFiles, f)
 			continue
 		}
 		lang := "markdown"

@@ -103,3 +103,25 @@ func TestDocsAnalyzer(t *testing.T) {
 	require.Equal(t, "README.md", e.Name)
 	require.Empty(t, res.Edges)
 }
+
+// TestDocsAnalyzerUnreadableFileRecordedAsFailed pins the FailedFiles contract for
+// docs: an unreadable file produces neither an entity nor a chunk, so it must be
+// excluded from both reconcile scopes. Docs is the only analyzer whose rows are
+// pure loss on both surfaces at once - leaving the file in scope purges its
+// doc_file entity AND its chunk with no replacement.
+func TestDocsAnalyzerUnreadableFileRecordedAsFailed(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("test requires non-root: chmod 000 is ineffective as root")
+	}
+	td := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(td, "gone.md"), []byte("# Gone\n"), 0o600))
+	require.NoError(t, os.Chmod(filepath.Join(td, "gone.md"), 0o000))
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(td, "gone.md"), 0o600) })
+
+	res, err := analyze.NewDocs().Analyze(context.Background(), td, []string{"gone.md"})
+	require.NoError(t, err, "an unreadable doc is a per-file soft failure, not a batch error")
+	require.Empty(t, res.Entities)
+	require.Empty(t, res.Chunks)
+	require.Contains(t, res.FailedFiles, "gone.md",
+		"unreadable doc must be reported in FailedFiles")
+}

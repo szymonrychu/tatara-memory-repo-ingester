@@ -115,8 +115,10 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 	reg := newReg(o.crossRepoPrefix, o.repoRoot)
 	groups := reg.Group(analyzeFiles)
 
-	// failedFiles tracks A/M/R files excluded from the chunk reconcile set so the
-	// server does not purge their existing chunks when no replacement was produced.
+	// failedFiles tracks A/M/R files excluded from BOTH reconcile scopes (the graph
+	// push Files set and the chunk reconcile set) so the server does not purge their
+	// existing rows when no replacement was produced. It is the single set both
+	// scopes subtract; anything narrower drifts (#37).
 	// Two sources feed it:
 	//   - per-file soft errors (res.FailedFiles): a single unreadable/unparseable
 	//     file the analyzer skipped without aborting its batch.
@@ -128,16 +130,23 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 
 	// quarantined tracks files whose analyzer HARD-errored (whole-batch failure,
 	// e.g. a go/packages load fault or a recovered tree-sitter panic). The analyzer
-	// produced no entities/edges/chunks for them, so they are excluded from BOTH the
-	// graph Files set and the chunk reconcile set: reconciling over them would purge
-	// their last-good rows with no replacement (the destructive partial #16 guards
-	// against). This completes the fail-closed design (#16) into fail-isolated:
+	// produced no entities/edges/chunks for them; they are a subset of failedFiles
+	// and are excluded from both reconcile scopes through it, since reconciling over
+	// them would purge their last-good rows with no replacement (the destructive
+	// partial #16 guards against). This set is kept separately only for reporting -
+	// the WARN, the metric and the completion log - because a hard error is a
+	// zero-base-rate operator signal that a whole group is stale, distinct from a
+	// single unparseable file. It is NOT load-bearing for correctness (#37).
+	// This completes the fail-closed design (#16) into fail-isolated:
 	// instead of aborting the whole run on a hard error, only the failing group is
 	// held at its last-good version while every healthy group and future commit keeps
 	// flowing. The poison files are re-analyzed the next time they (or, for
 	// go/packages, any file in their package) re-enter the diff. quarantined is a
 	// subset of failedFiles.
 	quarantined := make(map[string]struct{})
+
+	// softFailed counts distinct newly soft-failed paths for the completion log.
+	var softFailed int
 
 	var agg analyze.Result
 	for _, a := range reg.Analyzers() {
@@ -171,10 +180,25 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 			m.AnalyzerParseErrorsTotal.WithLabelValues(a.Name()).Add(float64(res.ParseErrors))
 		}
 		// Per-file read/parse failures: the analyzer skipped these (no replacement
-		// chunks produced) but did not abort the batch. They must be excluded from
-		// reconcile so the server does not purge their existing chunks.
+		// rows produced) but did not abort the batch. They must be excluded from both
+		// reconcile scopes so the server does not purge their existing rows. WARN with
+		// the paths, mirroring the quarantine WARN above: unlike a hard error a soft
+		// failure is usually a property of the file (an encoding the reader rejects, a
+		// construct the pinned grammar cannot parse), so it recurs on every diff that
+		// touches the file and its graph stays stale indefinitely.
+		var newSoft []string
 		for _, f := range res.FailedFiles {
+			if _, dup := failedFiles[f]; dup {
+				continue // already counted (duplicate append, or quarantined earlier)
+			}
 			failedFiles[f] = struct{}{}
+			newSoft = append(newSoft, f)
+		}
+		if len(newSoft) > 0 {
+			slog.Warn("analyzer soft-failed files; excluded from both reconcile scopes, last-good graph and chunks preserved",
+				"analyzer", a.Name(), "files", len(newSoft), "paths", newSoft)
+			m.IngestFilesSoftFailedTotal.WithLabelValues(a.Name()).Add(float64(len(newSoft)))
+			softFailed += len(newSoft)
 		}
 		slog.Info("analyzer complete",
 			"analyzer", a.Name(),
@@ -189,6 +213,18 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 		agg.Hyperedges = append(agg.Hyperedges, res.Hyperedges...)
 	}
 
+	// Drop every aggregated row owned by a failed file. FailedFiles says the
+	// analyzer produced nothing usable for that file, but nothing forces an analyzer
+	// to discover the failure BEFORE it emits: helm's processTemplate appends the
+	// template entity, then reads and parses. Since failedFiles is subtracted from
+	// graphFiles below, a surviving row would name a file outside GraphPush.Files and
+	// tatara-memory rejects the WHOLE push with 400 ErrInvalidScope - turning one
+	// unparseable file into a failed run. Filtering here makes the invariant
+	// structural instead of a precondition every future analyzer must remember.
+	if len(failedFiles) > 0 {
+		agg = dropRowsForFiles(agg, failedFiles)
+	}
+
 	if len(touched) == 0 {
 		commit := headCommit(o.repoRoot)
 		slog.Info("ingest no-op: no changed files", "repo", o.repoName, "commit", commit)
@@ -198,22 +234,24 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 	commit := headCommit(o.repoRoot)
 	cl := push.New(o.baseURL, hc, pollOr(o.pollInterval)).WithMetrics(m)
 
-	// graphFiles is the graph reconcile scope: touched minus quarantined. A
-	// quarantined group's analyzer emitted no entities, so leaving its files in
-	// Files would reconcile-purge their last-good graph rows with no replacement.
-	// Deleted and renamed-old paths are never quarantined (never analyzed) and stay
-	// in graphFiles so their stale rows are still purged correctly.
+	// graphFiles is the graph reconcile scope: touched minus failedFiles - the exact
+	// subtraction the chunk reconcile makes below, off the same set, so the two
+	// scopes cannot drift (#37). A failed file's analyzer emitted no usable rows for
+	// it (whether one soft per-file failure or a whole quarantined group), so leaving
+	// it in Files would reconcile-purge its last-good graph rows with no replacement.
+	// Deleted and renamed-old paths are never analyzed, so never in failedFiles, and
+	// stay in graphFiles so their stale rows are still purged correctly.
 	graphFiles := touched
-	if len(quarantined) > 0 {
+	if len(failedFiles) > 0 {
 		graphFiles = make([]string, 0, len(touched))
 		for _, f := range touched {
-			if _, q := quarantined[f]; !q {
+			if _, failed := failedFiles[f]; !failed {
 				graphFiles = append(graphFiles, f)
 			}
 		}
 	}
 
-	// When every touched file was quarantined (all A/M/R files in failing groups and
+	// When every touched file failed (all A/M/R files quarantined or soft-failed, and
 	// no deletions/renames) there is nothing healthy to push and the server rejects
 	// an empty Files set. Skip the graph push but still advance the commit so future
 	// windows keep flowing.
@@ -258,11 +296,53 @@ func run(ctx context.Context, o options, hc *http.Client) (retErr error) {
 		"repo", o.repoName, "files", len(touched),
 		"analyzed", len(analyzeFiles),
 		"quarantined", len(quarantined),
+		"soft_failed", softFailed,
 		"entities", len(agg.Entities), "edges", len(agg.Edges),
 		"chunks", len(agg.Chunks), "symbols", len(agg.Symbols),
 		"full", changes.FullSet,
 		"duration_ms", time.Since(start).Milliseconds())
 	return nil
+}
+
+// dropRowsForFiles returns res without any row owned by a file in drop. Entities
+// with an empty FilePath are repo/package-scoped (e.g. go_package) and always
+// kept: tatara-memory exempts them from push-scope validation and no single file
+// owns them.
+func dropRowsForFiles(res analyze.Result, drop map[string]struct{}) analyze.Result {
+	dropped := func(p string) bool {
+		if p == "" {
+			return false
+		}
+		_, ok := drop[p]
+		return ok
+	}
+	var out analyze.Result
+	for _, e := range res.Entities {
+		if !dropped(e.FilePath) {
+			out.Entities = append(out.Entities, e)
+		}
+	}
+	for _, e := range res.Edges {
+		if !dropped(e.SrcFile) {
+			out.Edges = append(out.Edges, e)
+		}
+	}
+	for _, c := range res.Chunks {
+		if !dropped(c.FilePath) {
+			out.Chunks = append(out.Chunks, c)
+		}
+	}
+	for _, s := range res.Symbols {
+		if !dropped(s.SrcFile) {
+			out.Symbols = append(out.Symbols, s)
+		}
+	}
+	for _, h := range res.Hyperedges {
+		if !dropped(h.SrcFile) {
+			out.Hyperedges = append(out.Hyperedges, h)
+		}
+	}
+	return out
 }
 
 func pollOr(d time.Duration) time.Duration {
