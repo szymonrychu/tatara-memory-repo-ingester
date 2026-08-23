@@ -116,7 +116,15 @@ func (ha *helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 		var manifest chartManifest
 		rawChart, err := os.ReadFile(absChartYAML) //nolint:gosec // analyzer reads arbitrary repo files by design
 		if err != nil {
-			ha.log.Warn("helm: cannot read Chart.yaml", "path", chartYAMLPath, "err", err)
+			ha.log.Warn("helm: cannot read Chart.yaml; skipping whole chart",
+				"path", chartYAMLPath, "chart_root", chartRoot, "skipped_files", len(cfiles), "err", err)
+			// This continue skips the REST of the loop body - this chart's values.yaml
+			// and every one of its templates - so every diff-set file in the chart
+			// produces nothing, not just Chart.yaml. Record cfiles, which IS this
+			// chart's slice of the diff set and nothing more: appending chartYAMLPath
+			// directly would poison the reconcile set with a repo-context path that was
+			// never in the push (see the parse branch below).
+			res.FailedFiles = append(res.FailedFiles, cfiles...)
 			continue
 		}
 		if err := sigsyaml.Unmarshal(rawChart, &manifest); err != nil {
@@ -136,7 +144,13 @@ func (ha *helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 		chartName := manifest.Name
 		// Guard against Chart.yaml files with no name field (finding 8).
 		if chartName == "" {
-			ha.log.Warn("helm: Chart.yaml missing name", "path", chartYAMLPath)
+			ha.log.Warn("helm: Chart.yaml missing name; skipping whole chart",
+				"path", chartYAMLPath, "chart_root", chartRoot, "skipped_files", len(cfiles))
+			// Same blast radius as the read branch above: without a chart name there is
+			// no helm:chart: / helm:value: identity to hang the chart's values and
+			// templates off, so the whole chart is skipped and every diff-set file in
+			// it produced nothing. cfiles is exactly that set.
+			res.FailedFiles = append(res.FailedFiles, cfiles...)
 			continue
 		}
 		chartID := "helm:chart:" + chartName

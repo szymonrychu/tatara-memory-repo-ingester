@@ -1210,6 +1210,70 @@ func TestRunFailedFilesExcludedFromBothReconcileScopes(t *testing.T) {
 	}
 }
 
+// TestRunNamelessHelmChartDoesNotPurgeWholeChart is the end-to-end statement of
+// the defect: a chart whose Chart.yaml has no name is skipped WHOLE, so its
+// values.yaml and every template produce nothing either. Before the analyzer
+// recorded them, all three stayed in both reconcile scopes and had their
+// last-good rows purged with no replacement. Unlike
+// TestRunFailedFilesExcludedFromBothReconcileScopes this drives the real helm
+// analyzer through analyze.Default, so it pins the whole chain rather than the
+// choke point alone.
+func TestRunNamelessHelmChartDoesNotPurgeWholeChart(t *testing.T) {
+	dir := newGitRepo(t)
+	write := func(name, body string) {
+		full := filepath.Join(dir, filepath.FromSlash(name))
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o750))
+		require.NoError(t, os.WriteFile(full, []byte(body), 0o644))
+	}
+	// A nameless chart, plus a healthy doc so the push is not empty.
+	write("chart/Chart.yaml", "apiVersion: v2\nversion: 0.1.0\n")
+	write("chart/values.yaml", "image:\n  repository: nginx\n")
+	write("chart/templates/deployment.yaml", "image: {{ .Values.image.repository }}\n")
+	write("ok.md", "# Ok\n\nbody\n")
+	base := commitAll(t, dir, "init")
+	// Touch all three chart files so every one of them is in the diff set - that is
+	// the case where the whole-chart skip is destructive.
+	write("chart/Chart.yaml", "apiVersion: v2\nversion: 0.2.0\n")
+	write("chart/values.yaml", "image:\n  repository: nginx2\n")
+	write("chart/templates/deployment.yaml", "image: {{ .Values.image.repository }}\nreplicas: 2\n")
+	write("ok.md", "# Ok\n\nbody2\n")
+	commitAll(t, dir, "touch chart and doc")
+
+	var graphPush contract.GraphPush
+	var bulkReq contract.BulkMemoriesRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/code-graph:bulk":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &graphPush)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"repo":"m"}`))
+		case "/memories:bulk":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &bulkReq)
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		default:
+			_, _ = w.Write([]byte(`{"id":"j","status":"succeeded"}`))
+		}
+	}))
+	defer srv.Close()
+
+	require.NoError(t, run(context.Background(), options{
+		repoRoot: dir, repoName: "m", baseURL: srv.URL, since: base,
+		getenv: func(string) string { return "" }, // skip best-effort semantic stage
+	}, http.DefaultClient))
+
+	// The healthy file still reconciles; the chart's diff-set files must not.
+	require.Contains(t, graphPush.Files, "ok.md", "the healthy file must still be reconciled")
+	for _, f := range []string{"chart/values.yaml", "chart/Chart.yaml", "chart/templates/deployment.yaml"} {
+		require.NotContains(t, graphPush.Files, f,
+			"%s produced nothing because the whole chart was skipped; keeping it in graph Files purges its last-good rows", f)
+		require.NotContains(t, bulkReq.ReconcileFiles, f,
+			"%s produced no chunks; keeping it in reconcile_files purges its last-good chunks", f)
+	}
+}
+
 // TestRunTouchedDeduplicatedForRenames verifies finding 4: when two different
 // renames share the same old or new path (edge case) or any duplication occurs,
 // the code-graph Files and reconcile_files must not contain duplicate entries.
