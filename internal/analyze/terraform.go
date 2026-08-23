@@ -46,6 +46,13 @@ func (ta terraformAnalyzer) Analyze(_ context.Context, repoRoot string, files []
 		body, ok := hclFile.Body.(*hclsyntax.Body)
 		if !ok {
 			ta.log.Warn("unexpected body type", "file", relPath)
+			// Defensive and unreachable today: Match claims only .tf, and
+			// ParseHCLFile returns an *hclsyntax.Body for every non-.json file. It
+			// records anyway so it cannot become the next unrecorded skip path if
+			// Match widens - a diff-set file that produces nothing and is not
+			// reported has its last-good rows purged with no replacement. Untested
+			// for the same reason it is unreachable.
+			res.FailedFiles = append(res.FailedFiles, relPath)
 			continue
 		}
 

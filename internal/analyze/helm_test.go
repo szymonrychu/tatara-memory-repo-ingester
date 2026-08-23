@@ -310,6 +310,110 @@ func TestHelmAnalyzer_EmptyChartName(t *testing.T) {
 		require.NotContains(t, e.ID, "helm:value:.", "must not emit malformed helm_value entities")
 	}
 	require.Empty(t, res.Entities, "no entities should be emitted when Chart.yaml has no name")
+
+	// The emit-nothing half above is only half the contract. Both files are in the
+	// diff set and both produced nothing, so both must be reported in FailedFiles
+	// or the caller keeps them in the reconcile scope and purges their last-good
+	// rows with no replacement.
+	require.ElementsMatch(t, []string{"Chart.yaml", "values.yaml"}, res.FailedFiles,
+		"every diff-set file of a nameless chart must be reported in FailedFiles")
+}
+
+// TestHelmAnalyzer_MissingChartNameRecordsWholeChart pins the blast radius of the
+// missing-name branch: it skips the REST of the per-chart loop, so the chart's
+// values.yaml and every one of its templates produce nothing too. All of them are
+// diff-set files and all of them must be recorded.
+func TestHelmAnalyzer_MissingChartNameRecordsWholeChart(t *testing.T) {
+	td := t.TempDir()
+	require.NoError(t, writeFile(td, "Chart.yaml", "apiVersion: v2\nversion: 0.1.0\n"))
+	require.NoError(t, writeFile(td, "values.yaml", "image:\n  repository: nginx\n"))
+	require.NoError(t, mkdirFile(td, "templates/deployment.yaml", "image: {{ .Values.image.repository }}\n"))
+
+	a := analyze.NewHelm(td)
+	files := []string{"Chart.yaml", "values.yaml", "templates/deployment.yaml"}
+	res, err := a.Analyze(context.Background(), td, files)
+	require.NoError(t, err, "a nameless Chart.yaml is a soft failure, not a batch error")
+
+	require.Empty(t, res.Entities, "a nameless chart emits nothing")
+	require.Empty(t, res.Chunks, "a nameless chart emits no chunks")
+	require.ElementsMatch(t, files, res.FailedFiles,
+		"the whole chart is skipped, so every diff-set file in it must be recorded")
+}
+
+// TestHelmAnalyzer_UnreadableChartYAMLRecordsWholeChart is the read-failure twin.
+// Reachability is narrow but real: Match's os.Stat gate (helm.go) only proves
+// Chart.yaml exists, not that it can be read, and the Chart.yaml-by-basename
+// short-circuit claims a file whose resolved chart root has no Chart.yaml at all.
+// A dangling symlink is used rather than chmod 000 so the test is uid-independent
+// (chmod is a no-op as root).
+func TestHelmAnalyzer_UnreadableChartYAMLRecordsWholeChart(t *testing.T) {
+	td := t.TempDir()
+	require.NoError(t, os.Symlink(filepath.Join(td, "does-not-exist.yaml"), filepath.Join(td, "Chart.yaml")))
+	require.NoError(t, writeFile(td, "values.yaml", "image:\n  repository: nginx\n"))
+	require.NoError(t, mkdirFile(td, "templates/deployment.yaml", "image: {{ .Values.image.repository }}\n"))
+
+	a := analyze.NewHelm(td)
+	files := []string{"Chart.yaml", "values.yaml", "templates/deployment.yaml"}
+	res, err := a.Analyze(context.Background(), td, files)
+	require.NoError(t, err, "an unreadable Chart.yaml is a soft failure, not a batch error")
+
+	require.Empty(t, res.Entities, "an unreadable Chart.yaml emits nothing for the whole chart")
+	require.ElementsMatch(t, files, res.FailedFiles,
+		"the whole chart is skipped, so every diff-set file in it must be recorded")
+}
+
+// TestHelmAnalyzer_ContextChartYAMLNotRecorded guards the one way the fix is easy
+// to get wrong: a Chart.yaml read purely for chart-name resolution is NOT a diff
+// file, and putting it in FailedFiles poisons the caller's reconcile set with a
+// path that was never in the push. Only cfiles (this chart's slice of the diff
+// set) may be recorded.
+func TestHelmAnalyzer_ContextChartYAMLNotRecorded(t *testing.T) {
+	td := t.TempDir()
+	require.NoError(t, writeFile(td, "Chart.yaml", "apiVersion: v2\nversion: 0.1.0\n"))
+	require.NoError(t, writeFile(td, "values.yaml", "key: val\n"))
+
+	a := analyze.NewHelm(td)
+	// Chart.yaml is deliberately NOT in the diff set; it is read for context only.
+	res, err := a.Analyze(context.Background(), td, []string{"values.yaml"})
+	require.NoError(t, err)
+
+	require.Equal(t, []string{"values.yaml"}, res.FailedFiles,
+		"only diff-set files may be recorded; a context-only Chart.yaml must not be")
+}
+
+// TestHelmAnalyzer_ChartRootFileWithNoRowsRecorded pins the third no-rows path in
+// the per-chart loop, which is reached on a HEALTHY chart. Match with repoRoot set
+// claims ANY path whose chart root has a Chart.yaml sibling, not just
+// Chart.yaml/values.yaml/templates, and helm is registered before docs, so a
+// chart's README.md is routed here. In Analyze it falls past chartYAMLPath, past
+// the valuesPath loop and past the isTemplate filter with no else: zero rows, and
+// until this test, zero record. Adding a Chart.yaml to a directory whose .md files
+// docs had already ingested is enough to purge them.
+//
+// Who SHOULD own a chart's README is a routing question and is deliberately not
+// answered here; see issue #43. This test pins only that the file is not silently
+// dropped.
+func TestHelmAnalyzer_ChartRootFileWithNoRowsRecorded(t *testing.T) {
+	td := t.TempDir()
+	require.NoError(t, writeFile(td, "Chart.yaml", "apiVersion: v2\nname: healthy\nversion: 0.1.0\n"))
+	require.NoError(t, writeFile(td, "values.yaml", "key: val\n"))
+	require.NoError(t, writeFile(td, "README.md", "# healthy\n"))
+	require.NoError(t, writeFile(td, "values-prod.yaml", "key: prod\n"))
+	require.NoError(t, writeFile(td, ".helmignore", "*.tmp\n"))
+
+	a := analyze.NewHelm(td)
+	// All five are claimed by Match and all five are in the diff set.
+	for _, f := range []string{"Chart.yaml", "values.yaml", "README.md", "values-prod.yaml", ".helmignore"} {
+		require.True(t, a.Match(f), "Match claims %q, which is why Analyze must account for it", f)
+	}
+	files := []string{"Chart.yaml", "values.yaml", "README.md", "values-prod.yaml", ".helmignore"}
+	res, err := a.Analyze(context.Background(), td, files)
+	require.NoError(t, err)
+
+	require.ElementsMatch(t, []string{"README.md", "values-prod.yaml", ".helmignore"}, res.FailedFiles,
+		"a claimed diff-set file the chart loop emits nothing for must be recorded")
+	require.NotContains(t, res.FailedFiles, "Chart.yaml", "Chart.yaml produced the chart entity")
+	require.NotContains(t, res.FailedFiles, "values.yaml", "values.yaml produced helm:value entities")
 }
 
 // TestHelmAnalyzer_UnreadableTemplateRecordedAsFailed pins the read-failure half
