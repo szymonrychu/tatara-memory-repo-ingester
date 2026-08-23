@@ -13,6 +13,19 @@ jobs:
     # scheduled `ci-shared-currency` check reds when it falls behind
     # (tatara-operator#640). Do not hand-edit it: a hand bump is overwritten by
     # the next release while the real fault stays open.
+    #
+    # THE PIN IS ONLY HALF OF THE CONTRACT. `enable-image-verify` is
+    # deliberately NOT set below, so it keeps its default of true and the
+    # shared `image-verify` job compiles this repo's Dockerfile on every pull
+    # request - the merge gate #556 asked for. Setting it false HERE would be
+    # invisible to that currency check, because ci-shared.yml at this pin is
+    # byte-identical either way; that is why the same check also reds
+    # `gate-dark` on any consumer that opts out without a matching
+    # `cicontract.ImageVerifyExempt` entry, with a reason, in tatara-operator.
+    # So an opt-out is a reviewed diff against the producer, not one line here.
+    # If image-verify goes red, the Dockerfile break it found is the thing to
+    # fix - turning the gate off to get a green PR is how it went dark the
+    # first time.
     uses: szymonrychu/tatara-operator/.github/workflows/ci-shared.yml@v3.10.0
     with:
       runner-label: tatara-memory-repo-ingester
