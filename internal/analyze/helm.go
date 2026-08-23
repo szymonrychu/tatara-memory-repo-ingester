@@ -243,6 +243,30 @@ func (ha *helmAnalyzer) Analyze(_ context.Context, repoRoot string, files []stri
 			}
 			ha.processTemplate(repoRoot, f, chartName, &res)
 		}
+
+		// The third no-rows path in this loop, and the only one reached on a
+		// perfectly HEALTHY chart. Match (with repoRoot set) claims every path whose
+		// chart root has a Chart.yaml sibling - not just Chart.yaml, values.yaml and
+		// templates/ - and helm is registered before docs, so a chart's README.md is
+		// routed here and then falls past every branch above with nothing emitted for
+		// it. Record it, or the caller keeps it in both reconcile scopes and purges
+		// its last-good rows; for a README docs had already ingested, adding a
+		// Chart.yaml beside it is enough to trigger that. Which analyzer SHOULD own a
+		// chart's README is a routing question and is deliberately not answered here
+		// (issue #43).
+		var unhandled []string
+		for _, f := range cfiles {
+			slash := filepath.ToSlash(f)
+			if slash == chartYAMLPath || slash == valuesPath || isTemplate(f) {
+				continue
+			}
+			unhandled = append(unhandled, f)
+		}
+		if len(unhandled) > 0 {
+			ha.log.Warn("helm: chart-root files claimed but not chart content; no rows emitted",
+				"chart_root", chartRoot, "skipped_files", len(unhandled))
+			res.FailedFiles = append(res.FailedFiles, unhandled...)
+		}
 	}
 
 	return res, nil

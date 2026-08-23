@@ -18,11 +18,17 @@ import (
 // scopes and tatara-memory purges its last-good rows with no replacement.
 //
 // The class has landed three times (#19, #37, #40), each time found by reading
-// rather than by CI, and each fix was per-site. A per-site test cannot fail when
-// analyzer number seven arrives with a new skip path; a TOTAL table over the
-// registry can. TestFailedFilesContract_CoversEveryAnalyzer is that assertion and
-// it runs unconditionally, so a new analyzer with no row here fails CI even
-// though every existing row still passes.
+// rather than by CI, and each fix was per-site.
+// TestFailedFilesContract_CoversEveryAnalyzer runs unconditionally, so a new
+// ANALYZER with no row here fails CI even though every existing row passes.
+//
+// KNOW THE BOUND. The table is total over analyzers, NOT over skip paths inside
+// one analyzer: it drives one unprocessable fixture per analyzer, so a SECOND
+// no-rows path in an analyzer that already has a row is invisible to it. That is
+// not hypothetical - this table was green while helm's chart-root over-claim
+// (#43) still dropped files unrecorded, and #42 is a second path in the go
+// analyzer. It shortens the list of ways this class can land; it does not close
+// it, and reading it as coverage of the class is the mistake it invites.
 
 // failedFilesCase drives one analyzer with a fixture whose diff-set file cannot
 // be processed, and asserts that file is reported.
@@ -123,9 +129,10 @@ func failedFilesCases() []failedFilesCase {
 	}
 }
 
-// TestFailedFilesContract_CoversEveryAnalyzer is the forcing function. It asserts
-// the table names EXACTLY the registry, so adding an analyzer without thinking
-// about its skip paths fails here even if every other row is green.
+// TestFailedFilesContract_CoversEveryAnalyzer asserts the table names EXACTLY the
+// registry, so adding an ANALYZER without thinking about its skip paths fails here
+// even if every other row is green. It does not and cannot assert that an existing
+// analyzer's skip paths are all covered - see the bound in the file header.
 func TestFailedFilesContract_CoversEveryAnalyzer(t *testing.T) {
 	var registered []string
 	for _, a := range analyze.Default("", t.TempDir()).Analyzers() {
