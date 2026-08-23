@@ -165,6 +165,79 @@ func TestParseFragmentHyperedgeSkipsFewerThanThreeMembers(t *testing.T) {
 	require.Equal(t, "he:r:f-go:just-right", res.Hyperedges[0].ID)
 }
 
+// TestParseFragmentHyperedgeSkipsWhenLabelsCollapseMembers asserts that the
+// arity check counts DISTINCT members after remap, not raw node count. Two
+// node ids sharing a Label remap to the same conceptID (finding: remapID is
+// keyed on slugified label, not node id), so a 3-node hyperedge with a shared
+// label has only 2 distinct members and must be skipped.
+func TestParseFragmentHyperedgeSkipsWhenLabelsCollapseMembers(t *testing.T) {
+	frag := `{"nodes":[
+	  {"id":"n1","label":"Shared","file_type":"concept","source_file":"f.go"},
+	  {"id":"n2","label":"Shared","file_type":"concept","source_file":"f.go"}
+	],"edges":[],"hyperedges":[
+	  {"id":"h1","label":"x","nodes":["n1","n2","c"],"relation":"form","confidence_score":0.7,"source_file":"f.go"}
+	]}`
+	res, err := ParseFragment("r", []byte(frag), nil)
+	require.NoError(t, err)
+	require.Empty(t, res.Hyperedges, "two members remap to the same conceptID, leaving only 2 distinct members")
+}
+
+// TestParseFragmentHyperedgeSkipsWhenLabelsSlugifyIdentically asserts that two
+// labels which are literally different strings but slugify to the same value
+// still collapse to one conceptID, so the arity check must still count them
+// as a single distinct member.
+func TestParseFragmentHyperedgeSkipsWhenLabelsSlugifyIdentically(t *testing.T) {
+	frag := `{"nodes":[
+	  {"id":"n1","label":"Token Validation","file_type":"concept","source_file":"f.go"},
+	  {"id":"n2","label":"token-validation","file_type":"concept","source_file":"f.go"}
+	],"edges":[],"hyperedges":[
+	  {"id":"h1","label":"x","nodes":["n1","n2","c"],"relation":"form","confidence_score":0.7,"source_file":"f.go"}
+	]}`
+	res, err := ParseFragment("r", []byte(frag), nil)
+	require.NoError(t, err)
+	require.Empty(t, res.Hyperedges, "\"Token Validation\" and \"token-validation\" slugify to the same conceptID")
+}
+
+// TestParseFragmentHyperedgeSkipsOnDuplicateNodeID asserts that a literal
+// duplicate node id in a hyperedge's Nodes list is also deduped before the
+// arity check, since the server counts distinct members.
+func TestParseFragmentHyperedgeSkipsOnDuplicateNodeID(t *testing.T) {
+	frag := `{"nodes":[],"edges":[],"hyperedges":[
+	  {"id":"h1","label":"x","nodes":["a","a","b"],"relation":"form","confidence_score":0.7,"source_file":"f.go"}
+	]}`
+	res, err := ParseFragment("r", []byte(frag), nil)
+	require.NoError(t, err)
+	require.Empty(t, res.Hyperedges, "\"a\" repeated leaves only 2 distinct members")
+}
+
+// TestParseFragmentHyperedgeDropsEmptyMember asserts that an empty-string node
+// id (which remapID passes through unchanged, unlike the edge loop which
+// drops empty endpoints) is dropped from the member list rather than emitted,
+// and does not count toward arity.
+func TestParseFragmentHyperedgeDropsEmptyMember(t *testing.T) {
+	frag := `{"nodes":[],"edges":[],"hyperedges":[
+	  {"id":"h1","label":"x","nodes":["a","b","c",""],"relation":"form","confidence_score":0.7,"source_file":"f.go"}
+	]}`
+	res, err := ParseFragment("r", []byte(frag), nil)
+	require.NoError(t, err)
+	require.Len(t, res.Hyperedges, 1)
+	require.Equal(t, []string{"a", "b", "c"}, res.Hyperedges[0].Members)
+}
+
+// TestParseFragmentHyperedgeMembersDedupedOrderPreserved asserts that when a
+// hyperedge has duplicate-collapsing members but still >= 3 distinct after
+// dedup, it is emitted with a deduped Members slice in first-seen order (order
+// is hashed into the id, so a map-based dedup would make ids nondeterministic).
+func TestParseFragmentHyperedgeMembersDedupedOrderPreserved(t *testing.T) {
+	frag := `{"nodes":[],"edges":[],"hyperedges":[
+	  {"id":"h1","label":"x","nodes":["a","b","c","a","d"],"relation":"form","confidence_score":0.7,"source_file":"f.go"}
+	]}`
+	res, err := ParseFragment("r", []byte(frag), nil)
+	require.NoError(t, err)
+	require.Len(t, res.Hyperedges, 1)
+	require.Equal(t, []string{"a", "b", "c", "d"}, res.Hyperedges[0].Members)
+}
+
 // TestParseFragmentHyperedgeFallbackIDOnEmptyFields asserts that when source_file
 // or id are empty the id falls back to a hash of members+label (finding 1).
 func TestParseFragmentHyperedgeFallbackIDOnEmptyFields(t *testing.T) {

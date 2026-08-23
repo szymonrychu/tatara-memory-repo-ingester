@@ -61,9 +61,8 @@ func ParseFragment(repo string, body []byte, validFiles map[string]struct{}) (an
 	if err := dec.Decode(&f); err != nil {
 		return analyze.Result{}, fmt.Errorf("parse extraction fragment: %w", err)
 	}
-	// inValidFiles returns true when validFiles is nil (skip validation) or the
-	// path is present in the set. An empty path is treated as absent so it does
-	// not accidentally satisfy the nil-bypass.
+	// inValidFiles returns true when validFiles is nil (skip validation,
+	// including for an empty path) or the path is present in the set.
 	inValidFiles := func(path string) bool {
 		if validFiles == nil {
 			return true
@@ -130,20 +129,35 @@ func ParseFragment(repo string, body []byte, validFiles map[string]struct{}) (an
 		if emitted >= maxHyperedgesPerChunk {
 			break
 		}
-		// Contract requires 3+ members; skip under-populated hyperedges.
-		if len(h.Nodes) < 3 {
-			continue
-		}
 		// Drop hyperedges whose source_file is not in the chunk's file set: like
 		// edges, the memory server rejects the entire push if any src_file is not
 		// in Files (mirrors the edge guard above; finding 2).
 		if !inValidFiles(h.SourceFile) {
 			continue
 		}
-		// Remap members through the concept-id table, mirroring edge endpoint remapping.
-		members := make([]string, len(h.Nodes))
-		for j, m := range h.Nodes {
-			members[j] = remapID(m)
+		// Remap members through the concept-id table, mirroring edge endpoint
+		// remapping, then drop empty ids and dedup preserving first-seen order.
+		// remapID is keyed on the slugified Label, not the node id, so distinct
+		// model node ids (or a literal duplicate id) can collapse to the same
+		// member here. The server counts DISTINCT members against the 3+
+		// contract, so the arity check below must run on this deduped slice,
+		// not len(h.Nodes) - checking the raw node count would let a hyperedge
+		// through that the server then rejects, discarding the whole batch.
+		seen := make(map[string]struct{}, len(h.Nodes))
+		members := make([]string, 0, len(h.Nodes))
+		for _, m := range h.Nodes {
+			rm := remapID(m)
+			if rm == "" {
+				continue
+			}
+			if _, ok := seen[rm]; ok {
+				continue
+			}
+			seen[rm] = struct{}{}
+			members = append(members, rm)
+		}
+		if len(members) < 3 {
+			continue
 		}
 		res.Hyperedges = append(res.Hyperedges, contract.Hyperedge{
 			ID:              hyperedgeID(repo, h.SourceFile, h.ID, h.Label, members),
