@@ -72,7 +72,7 @@ func failedFilesCases() []failedFilesCase {
 			// every *_test.go file is likewise absent from GoFiles (Tests is false),
 			// as is every build-tag-excluded file, and recording those would pin the
 			// soft-failure counter permanently above zero. It needs its own change;
-			// see MEMORY.md.
+			// see issue #42.
 			skipReason: "go/packages omits unreadable files from pkg.GoFiles, so the fallback read-failure branch is unreachable black-box",
 			build: func(t *testing.T, dir string) (analyze.Analyzer, []string, []string) {
 				return analyze.NewGo(""), nil, nil
